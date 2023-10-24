@@ -121,7 +121,7 @@ class SaraR5 extends UBloxCellular:
     if not pwr_on: return
     critical_do --no-respect_deadline:
       pwr_on.set 1
-      sleep --ms=1000
+      sleep --ms=1000 // Minimum is 100ms for SARA-R500S and SARA-R510M8S and 1s for SARA-R510S
       pwr_on.set 0
       // TODO(kasper): We try to wait for a bit like we do on
       // the SaraR4. It isn't clear if this is necessary.
@@ -129,6 +129,7 @@ class SaraR5 extends UBloxCellular:
 
   power_off -> none:
     if not (pwr_on and reset_n): return
+    logger.info "performing emergency hardware shutdown"
     critical_do --no-respect_deadline:
       pwr_on.set 1
       reset_n.set 1
@@ -139,6 +140,7 @@ class SaraR5 extends UBloxCellular:
 
   reset -> none:
     if not reset_n: return
+    logger.info "resetting modem"
     critical_do --no-respect_deadline:
       reset_n.set 1
       sleep --ms=150  // Minimum is 100ms.
@@ -147,7 +149,15 @@ class SaraR5 extends UBloxCellular:
 
   // Prefer reset over power_off (100ms vs ~25s).
   recover_modem:
-    reset
+    logger.info "attempting modem recovery"
+    reset_error := catch: 
+      reset
+      with_timeout --ms=5_000:
+        wait_for_ready
+      
+    if reset_error:
+      logger.warn "modem not responding after reset, attempting full power off"
+      power_off
   
   is_powered_off -> bool?:
     if rx == null: return null

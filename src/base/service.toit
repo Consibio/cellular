@@ -231,11 +231,20 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
         --baud_rates=uart_baud_rates
 
     try:
-      with_timeout --ms=20_000: driver.wait_for_ready
+      logger.info "waiting for driver to be ready"
+      not_ready := catch: with_timeout --ms=20_000: driver.wait_for_ready
+      if not_ready: 
+        sleep --ms=300 // Wait for data to be flushed.
+        logger.warn "driver still not ready, recovering modem"
+        driver.recover_modem
+        logger.info "recover done. waiting for driver to be ready"
+        catch --trace: with_timeout --ms=10_000: 
+          driver.wait_for_ready
+      logger.info "driver initialized"
       return driver
     finally: | is_exception _ |
       if is_exception:
-        driver.recover_modem
+        logger.warn "could not initialize driver"
         close_pins_
 
   close_pins_ -> none:
