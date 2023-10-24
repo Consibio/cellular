@@ -147,7 +147,7 @@ class SaraR5 extends UBloxCellular:
 
   // Prefer reset over power_off (100ms vs ~25s).
   recover_modem:
-    reset
+    power_off
   
   is_powered_off -> bool?:
     if rx == null: return null
