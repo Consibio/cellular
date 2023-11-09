@@ -21,6 +21,7 @@ import system.storage
 
 import .cellular
 import ..api.state
+import ..state
 
 CELLULAR_FAILS_BETWEEN_RESETS /int ::= 8
 CELLULAR_FAILS_UNTIL_SCAN  /int ::= 2
@@ -75,6 +76,8 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
   driver_/Cellular? := null
 
   static ATTEMPTS_KEY ::= "attempts"
+  static SIGNAL_QUAL_KEY ::= "signal.qual"
+  static SIGNAL_POWER_KEY ::= "signal.pwr"
   bucket_/storage.Bucket ::= storage.Bucket.open --flash "toitware.com/cellular"
   attempts_/int := ?
 
@@ -176,6 +179,15 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
       // the foreground and needs to have its proxied networks closed
       // correctly in order for the shutdown to be clean.
       containers.notify-background-state-changed false
+
+      // Grab signal quality and cache it in the bucket.
+      // In this way, it can be queried by a consumer of
+      // the CellularStateService also when the connection
+      // is down.
+      signal := driver.signal_quality
+      if signal:
+        update_cached_signal_quality signal
+
       return driver.network_interface
     finally: | is_exception exception |
       if is_exception:
@@ -327,21 +339,36 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
       // deadlines into consideration.
       sleep --ms=10
 
+  get_cached_signal_quality -> SignalQuality?:
+    quality := bucket_.get SIGNAL_QUAL_KEY
+    power := bucket_.get SIGNAL_POWER_KEY
+    return (quality and power) ? (SignalQuality --power=power --quality=quality) : null
+  
+  update_cached_signal_quality signal_quality/SignalQuality:
+    bucket_[SIGNAL_QUAL_KEY] = signal_quality.quality
+    bucket_[SIGNAL_POWER_KEY] = signal_quality.power
+
 class CellularStateServiceHandler_ implements ServiceHandler CellularStateService:
   provider/CellularServiceProvider
   constructor .provider:
 
   handle index/int arguments/any --gid/int --client/int -> any:
-    if index == CellularStateService.QUALITY_INDEX: return quality
+    if index == CellularStateService.QUALITY_INDEX: return quality arguments
     if index == CellularStateService.ICCID_INDEX: return iccid
     if index == CellularStateService.MODEL_INDEX: return model
     if index == CellularStateService.VERSION_INDEX: return version
     unreachable
 
-  quality -> any:
+  quality cache/bool=true -> any:
     driver := provider.driver_
-    if not driver: return null
-    result := driver.signal_quality
+    result := null
+    if not driver:
+      catch: 
+        result = provider.get_cached_signal_quality
+    else if cache:
+      result = driver.signal_quality
+      if result:
+        provider.update_cached_signal_quality result
     return result ? [ result.power, result.quality ] : null
 
   iccid -> string?:

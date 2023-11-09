@@ -61,7 +61,7 @@ abstract class CellularBase implements Cellular:
     return false
 
   model:
-    r := at_.do: it.action "+CGMM"
+    r := at_.do: it.action "I"
     return r.last.first
 
   version:
