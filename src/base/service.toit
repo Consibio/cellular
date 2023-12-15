@@ -188,7 +188,7 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
       if signal:
         update_cached_signal_quality signal
 
-      return driver.network_interface
+      return driver.open-network --provider=this
     finally: | is_exception exception |
       if is_exception:
         critical_do: close_driver driver --error=exception.value
