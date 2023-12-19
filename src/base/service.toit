@@ -158,10 +158,11 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
       with_timeout --ms=30_000:
         logger.info "configuring modem" --tags={"apn": apn}
         driver.configure apn --bands=bands --rats=rats
-      with_timeout --ms=120_000:
         logger.info "enabling radio"
         driver.enable_radio
-        logger.info "connecting"
+        
+      // Scans can take up to 3 minutes on u-blox SARA
+      with_timeout --ms=180_000:
         // After the CELLULAR_FAILS_UNTIL_SCAN threshold has passed,
         // we initiate a scan every third attempt to limit collisions
         // with reset attempts.
@@ -171,6 +172,10 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
           // TODO: Track which operators always fail and blacklist them
           // or select other ones manually to prevent reselection of
           // non-functional operators.
+
+      // Connects can take up to 3 minutes on u-blox SARA
+      with_timeout --ms=180_000:
+        logger.info "connecting"
         driver.connect
       update-attempts_ 0  // Success. Reset the attempts.
       logger.info "connected"
