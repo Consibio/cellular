@@ -102,10 +102,10 @@ class SaraR5 extends UBloxCellular:
     if not list_equals_ upsd_protocol.last upsd_protocol_target:
       session.set "+UPSD" upsd_protocol_target
       changed = true
-
-    if changed:
-      send_abortable_ session (UPSDA --action=0)
-      send_abortable_ session (UPSDA --action=3)
+ 
+    // This should be called each time. If not called
+    // the subsequent USOCR (socket create) will fail.
+    send_abortable_ session (UPSDA --action=3)
 
   psm_enabled_psv_target -> List:
     return [1, 2000]  // TODO(kasper): Testing - go to sleep after ~9.2s.
