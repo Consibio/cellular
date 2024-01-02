@@ -84,7 +84,7 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
   static ATTEMPTS_KEY ::= "attempts"
   static SIGNAL_QUAL_KEY ::= "signal.qual"
   static SIGNAL_POWER_KEY ::= "signal.pwr"
-  static SCORES_KEY ::= "op.score"
+  static SCORES_KEY ::= "opz.scores"
   bucket_/storage.Bucket ::= storage.Bucket.open --flash "toitware.com/cellular"
   attempts_/int := ?
   scores_/OperatorScores := ?
@@ -205,7 +205,11 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
           // new one, if there exists one with a higher score than 
           // the last. Also do this if we have just scanned for 
           // operators to ensure that we try out newly discovered
-          // operators.
+          // operators. 
+          // If no known scores are known, score_for_last_operator 
+          // will return 0, but get_best_operator will return null,
+          // so it will attempt auto-COPS until a scan has been
+          // performed at least one time.
           if scores_.score_for_last_operator < OPERATOR_SCORE_THRESHOLD or should_scan:
             operator_ = scores_.get_best_operator
 
@@ -341,8 +345,18 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
         disconnected_at_ = esp32.total_run_time
         log.log log_level "closing" --tags=log_tags
         
-        // Update score of used operator
+        // Calculate time_to_error as the number of seconds from the
+        // connected_at_ time to the disconnected_at_ time (which are
+        // both in microseconds, so we converted to secs and round).
+        // If the modem was never connected, we set time_to_error to
+        // 0 seconds.
         time_to_error := (connected_at_ is int) ?  ((disconnected_at_ - connected_at_)*0.000001).round : 0
+
+        // Calculate the tte_score (time-to-error score). If the
+        // driver was closed with an error, we use the time_to_error
+        // as the tte_score. Otherwise, we use the ACCEPTABLE_TIME_TO_ERROR
+        // as the tte_score. This is to ensure that we don't penalize
+        // the operator for a connection that was closed cleanly.
         tte_score := (error) ? time_to_error : ACCEPTABLE_TIME_TO_ERROR
 
         // Get the currently active operator in order to score it properly.
@@ -361,9 +375,9 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
 
         // If we have an operator, we score it.
         if operator:
-          new_score := scores_.add --tte=tte_score --time=Time.now --operator=operator
+          scores_.add --tte=tte_score --time=Time.now --operator=operator
           update_scores_
-          logger.info "Saved operator scores to flash. New score for $operator.op is $(%0.2f new_score)%"
+          logger.info "Saved new operator score to flash for $operator.op. Scores are now: $scores_.stringify_scores"
 
       // Close the driver
       catch: with_timeout --ms=20_000: driver.close
@@ -493,6 +507,13 @@ class OperatorScores:
 
   operators -> List:
     return operator_scores_.keys
+
+  stringify_scores -> string:
+    strings := []
+    operator_scores_.do: | op session |
+      score := session.get "score"
+      strings.add "($op: $(score is float ? "$(%.2f score)%" : "-"))"
+    return strings.join ", "
 
   set_available_operators operators/List -> none:
     operators_to_remove := []
