@@ -192,7 +192,6 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
 
           // If the score of the operator connected last is below the limit,
           // manually connect to a new one, if there exists one with a higher score than the last.
-          print "scores_.score_for_last_operator=$scores_.score_for_last_operator  scores_=$scores_.to_map  attempts_=$attempts_"
           if scores_.score_for_last_operator < 75 or scores_.operators.size == 0 or (attempts_ > CELLULAR_FAILS_UNTIL_SCAN):
             logger.info "last operator score below limit or no operators available"
             if (scores_.operators.size == 0) or ((attempts_ > CELLULAR_FAILS_UNTIL_SCAN) and (attempts_ % 3 == 0)):
@@ -323,8 +322,7 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
         
         // Update score of used operator
         time_to_error := (connected_at_ is int) ?  ((disconnected_at_ - connected_at_)*0.000001).round : 0
-        tte_score := (error /*and "$error" != "CANCELED"*/) ? time_to_error : ACCEPTABLE_TIME_TO_ERROR
-        // if ("$error" == "CANCELED"): tte_score = ACCEPTABLE_TIME_TO_ERROR / 2 // TODO: Is this the right way to handle this?
+        tte_score := (error) ? time_to_error : ACCEPTABLE_TIME_TO_ERROR
 
         // Get the currently active operator in order to score it properly.
         // If operator_ was defined during connection, use that. Otherwise,
@@ -341,9 +339,9 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
 
         // If we have an operator, we score it.
         if operator:
-          scores_.add --tte=tte_score --time=Time.now --operator=operator
+          new_score := scores_.add --tte=tte_score --time=Time.now --operator=operator
           update_scores_
-          print "Saved scores to flash! scores_.to_map=$scores_.to_map"
+          logger.info "Saved operator scores to flash. New score for $operator.op is $(%0.2f new_score)%"
 
       // Close the driver
       catch: with_timeout --ms=20_000: driver.close
@@ -455,14 +453,14 @@ class OperatorScores:
   constructor operator_scores/Map?:
     operator_scores_ = operator_scores or {:}
 
-  add --tte/int --time/Time --operator/Operator -> none:
-    print "OperatorScores.add tte=$tte time=$time operator=$operator"
+  add --tte/int --time/Time --operator/Operator -> float?:
     last_operator_session := operator_scores_.get operator.op --if-absent=: {:}
     if last_operator_session is not Map: last_operator_session = {:}
     last_score := last_operator_session.get "score" --if_absent=: RESET-SCORE
     tte = (tte > ACCEPTABLE_TIME_TO_ERROR) ? ACCEPTABLE_TIME_TO_ERROR : tte
     new_score := (0.2*(tte/ACCEPTABLE-TIME-TO-ERROR)*100.0 + 0.8*last_score)
     operator_scores_[operator.op] = {"tte": tte, "time": time.s-since-epoch, "score": new_score, "available": true}
+    return new_score
 
   reset_all:
     operator_scores_ = {:}
@@ -475,7 +473,6 @@ class OperatorScores:
     return operator_scores_.keys
 
   set_available_operators operators/List -> none:
-    print "set_available_operators operators=$operators"
     operators_to_remove := []
     operators_codes := operators.map: | operator | operator.op
     operator_scores_.do: | op |
@@ -500,19 +497,16 @@ class OperatorScores:
         operator_scores_.remove oldest_unavailable
 
   get_best_operator -> Operator?:
-    print "get_best_operator operator_scores_=$operator_scores_"
     best_op := null
     best_score := 0
     operator_scores_.do: | op session |
       available := (session is Map) ? (session.get "available" --if_absent=: true) : true
       if available:
         score := (session is Map) ? (session.get "score" --if_absent=: RESET-SCORE) : RESET-SCORE
-        print "get_best_operator op=$op score=$score"
         if score > best_score:
           best_score = score
           best_op = op
 
-    print "get_best_operator best_op=$best_op best_score=$best_score"
     return (best_op == null) ? null : (Operator best_op)
 
   to_map -> Map:
@@ -544,7 +538,6 @@ class OperatorScores:
 
   score_for_last_operator -> float:
     session := get_last_session_
-    print "score_for_last_operator session=$session"
 
     // If there is no last session, return 0 to indicate that 
     // we should scan for operators.
