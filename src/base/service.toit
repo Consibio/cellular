@@ -341,7 +341,7 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
         if operator:
           new_score := scores_.add --tte=tte_score --time=Time.now --operator=operator
           update_scores_
-          logger.info "Saved operator scores to flash. New score for $operator.op is $new_score%"
+          logger.info "Saved operator scores to flash. New score for $operator.op is $(%0.2f new_score)%"
 
       // Close the driver
       catch: with_timeout --ms=20_000: driver.close
