@@ -89,20 +89,34 @@ class SaraR5 extends UBloxCellular:
       // an illegal operation at this point.
       return
 
-    // Attach to network.
-    changed := false
-    upsd_map_cid_target := [0, 100, 1]
-    upsd_map_cid := session.set "+UPSD" upsd_map_cid_target[0..2]
-    if not list_equals_ upsd_map_cid.last upsd_map_cid_target:
-      session.set "+UPSD" upsd_map_cid_target
-      changed = true
+    // Set Primary DNS server to one of Google's DNS servers.
+    // If left untouched, the network will normally provide it,
+    // but we have seen that this is not always the case (TDC).
+    // We leave the secondary DNS server untouched to use the
+    // network provided one as a fallback.
+    upsd_set_dns_target := [0, 4, "8.8.8.8"]
+/*     upsd_set_dns := session.set "+UPSD" upsd_set_dns_target[0..2]
+    if not list_equals_ upsd_set_dns.last upsd_set_dns_target: */
+    session.set "+UPSD" upsd_set_dns_target
 
+    // Map PSD profile id 0 to PDP context ID (cid) 1
+    upsd_map_cid_target := [0, 100, 1]
+/*     upsd_map_cid := session.set "+UPSD" upsd_map_cid_target[0..2]
+    if not list_equals_ upsd_map_cid.last upsd_map_cid_target: */
+    session.set "+UPSD" upsd_map_cid_target
+
+    // Set the protocol type to IPv4.
+    // Possible options are:
+    //    0 (default value): IPv4
+    //    1: IPv6
+    //    2: IPv4v6 with IPv4 preferred for internal sockets
+    //    3: IPv4v6 with IPv6 preferred for internal sockets
     upsd_protocol_target := [0, 0, 0]
-    upsd_protocol := session.set "+UPSD" upsd_protocol_target[0..2]
-    if not list_equals_ upsd_protocol.last upsd_protocol_target:
-      session.set "+UPSD" upsd_protocol_target
-      changed = true
+   /*  upsd_protocol := session.set "+UPSD" upsd_protocol_target[0..2]
+    if not list_equals_ upsd_protocol.last upsd_protocol_target: */
+    session.set "+UPSD" upsd_protocol_target
  
+    // Activate the PDP context.
     // This should be called each time. If not called
     // the subsequent USOCR (socket create) will fail.
     send_abortable_ session (UPSDA --action=3)
