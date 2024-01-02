@@ -27,6 +27,7 @@ import esp32
 CELLULAR_FAILS_BETWEEN_RESETS /int ::= 8
 CELLULAR_FAILS_UNTIL_SCAN  /int ::= 2
 ACCEPTABLE_TIME_TO_ERROR /int ::= 300 // seconds = 5 minutes
+OPERATOR_SCORE_THRESHOLD /int ::= 75
 
 CELLULAR_RESET_NONE      /int ::= 0
 CELLULAR_RESET_SOFT      /int ::= 1
@@ -186,17 +187,30 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
         catch --trace:
 
           // If we have tried to connect without succes more than
-          // 32 times, reset the scores.
+          // 32 times, reset the scores to ensure that we are not
+          // stuck, if some scoring logic is broken.
           if (attempts_ > 0 and attempts_ % 32 == 0): 
             scores_.reset_all
 
-          // If the score of the operator connected last is below the limit,
-          // manually connect to a new one, if there exists one with a higher score than the last.
-          if scores_.score_for_last_operator < 75 or scores_.operators.size == 0 or (attempts_ > CELLULAR_FAILS_UNTIL_SCAN):
-            logger.info "last operator score below limit or no operators available"
-            if (scores_.operators.size == 0) or ((attempts_ > CELLULAR_FAILS_UNTIL_SCAN) and (attempts_ % 3 == 0)):
-              logger.info "scanning for operators" --tags={"attempt": attempts_}
-              scores_.set_available_operators driver.scan_for_operators
+          // If we have tried to connect without succes more than
+          // the number of times defined by CELLULAR_FAILS_UNTIL_SCAN,
+          // scan for operators.
+          should_scan := (attempts_ > CELLULAR_FAILS_UNTIL_SCAN) and (attempts_ % 3 == 0)
+          if (should_scan):
+            logger.info "scanning for operators" --tags={"attempt": attempts_}
+            scores_.set_available_operators driver.scan_for_operators
+
+          // If the score of the operator connected last is below 
+          // the OPERATOR_SCORE_THRESHOLD, manually connect to a 
+          // new one, if there exists one with a higher score than 
+          // the last. Also do this if we have just scanned for 
+          // operators to ensure that we try out newly discovered
+          // operators. 
+          // If no known scores are known, score_for_last_operator 
+          // will return 0, but get_best_operator will return null,
+          // so it will attempt auto-COPS until a scan has been
+          // performed at least one time.
+          if scores_.score_for_last_operator < OPERATOR_SCORE_THRESHOLD or should_scan:
             operator_ = scores_.get_best_operator
 
       // Connects can take up to 3 minutes on u-blox SARA
@@ -205,6 +219,17 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
         driver.connect --operator=operator_
       update_attempts_ 0  // Success. Reset the attempts.
       logger.info "connected"
+
+      // If we used auto-COPS (ie. operator_ is null), we poll
+      // the modem for the operator it is connected to in order
+      // to be able to provide it a score after the session. It is
+      // more reliable to query the modem here after the shutdown
+      // procedure is underway.
+      if operator_ == null:
+        catch:
+          with_timeout --ms=5_000:
+            operator_ = driver.get_connected_operator
+
       connected_at_ = esp32.total_run_time
       // Once the network is established, we change the state of the
       // cellular container to indicate that it is now running in
@@ -320,8 +345,18 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
         disconnected_at_ = esp32.total_run_time
         log.log log_level "closing" --tags=log_tags
         
-        // Update score of used operator
+        // Calculate time_to_error as the number of seconds from the
+        // connected_at_ time to the disconnected_at_ time (which are
+        // both in microseconds, so we converted to secs and round).
+        // If the modem was never connected, we set time_to_error to
+        // 0 seconds.
         time_to_error := (connected_at_ is int) ?  ((disconnected_at_ - connected_at_)*0.000001).round : 0
+
+        // Calculate the tte_score (time-to-error score). If the
+        // driver was closed with an error, we use the time_to_error
+        // as the tte_score. Otherwise, we use the ACCEPTABLE_TIME_TO_ERROR
+        // as the tte_score. This is to ensure that we don't penalize
+        // the operator for a connection that was closed cleanly.
         tte_score := (error) ? time_to_error : ACCEPTABLE_TIME_TO_ERROR
 
         // Get the currently active operator in order to score it properly.
@@ -332,16 +367,17 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
         // in the scores_.
         operator := operator_
         if not operator:
-          catch: with-timeout --ms=2_000: 
-            operator = driver.get_connected_operator
+          catch:
+            with-timeout --ms=5_000: 
+              operator = driver.get_connected_operator
         if not operator:
           operator = scores_.get_last_operator
 
         // If we have an operator, we score it.
         if operator:
-          new_score := scores_.add --tte=tte_score --time=Time.now --operator=operator
+          scores_.add --tte=tte_score --time=Time.now --operator=operator
           update_scores_
-          logger.info "Saved operator scores to flash. New score for $operator.op is $(%0.2f new_score)%"
+          logger.info "Saved new operator score to flash for $operator.op. Scores are now: $scores_.stringify_scores"
 
       // Close the driver
       catch: with_timeout --ms=20_000: driver.close
@@ -472,6 +508,13 @@ class OperatorScores:
   operators -> List:
     return operator_scores_.keys
 
+  stringify_scores -> string:
+    strings := []
+    operator_scores_.do: | op session |
+      score := session.get "score"
+      strings.add "($op: $(score is float ? "$(%.2f score)%" : "-"))"
+    return strings.join ", "
+
   set_available_operators operators/List -> none:
     operators_to_remove := []
     operators_codes := operators.map: | operator | operator.op
@@ -507,7 +550,7 @@ class OperatorScores:
           best_score = score
           best_op = op
 
-    return (best_op == null) ? null : (Operator best_op)
+    return (best_op is string and best_op.size > 0) ? (Operator best_op) : null
 
   to_map -> Map:
     return operator_scores_
@@ -525,16 +568,16 @@ class OperatorScores:
     return last_session
 
   get_last_operator -> Operator?:
-    if not operator_scores_: return null
+    if not operator_scores_ is Map: return null
     last_session_time := 0
-    last_op := ""
+    last_op := null
     operator_scores_.do: | op session |
       if session is Map:
         session_time := session.get "time" --if_absent=: 0
         if session_time > last_session_time:
           last_session_time = session_time
           last_op = op
-    return (last_op is string) ? (Operator last_op) : null
+    return (last_op is string and last_op.size > 0) ? (Operator last_op) : null
 
   score_for_last_operator -> float:
     session := get_last_session_
@@ -544,5 +587,5 @@ class OperatorScores:
     if not session: return 0.0
 
     // If there is a sessions but it doesn't have a score yet,
-    // return 100 to prioritize it.
+    // return the RESET-SCORE.
     return (session.get "score" --if_absent=: RESET-SCORE).to_float

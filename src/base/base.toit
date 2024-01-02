@@ -96,7 +96,7 @@ abstract class CellularBase implements Cellular:
     catch --trace:
       at_.do: | session/at.Session |
         res := (send_abortable_ session COPS.read).last
-        if res.size == 4 and res[1] == COPS.FORMAT_NUMERIC and res[2] is string and res[2].size == 5:
+        if res.size == 4 and res[1] == COPS.FORMAT_NUMERIC and res[2] is string and (res[2].size == 5 or res[2].size == 6):
           return Operator res[2]
     return null
 
