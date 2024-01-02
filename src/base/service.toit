@@ -22,9 +22,11 @@ import system.storage
 import .cellular
 import ..api.state
 import ..state
+import esp32
 
 CELLULAR_FAILS_BETWEEN_RESETS /int ::= 8
 CELLULAR_FAILS_UNTIL_SCAN  /int ::= 2
+ACCEPTABLE_TIME_TO_ERROR /int ::= 300 // seconds = 5 minutes
 
 CELLULAR_RESET_NONE      /int ::= 0
 CELLULAR_RESET_SOFT      /int ::= 1
@@ -74,17 +76,28 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
   reset_pin_/gpio.Pin? := null
 
   driver_/Cellular? := null
+  connected_at_/int? := null
+  disconnected_at_/int? := null
+  operator_/Operator? := null
 
   static ATTEMPTS_KEY ::= "attempts"
   static SIGNAL_QUAL_KEY ::= "signal.qual"
   static SIGNAL_POWER_KEY ::= "signal.pwr"
+  static SCORES_KEY ::= "operator.scores"
   bucket_/storage.Bucket ::= storage.Bucket.open --flash "toitware.com/cellular"
   attempts_/int := ?
+  scores_/OperatorScores := ?
 
   constructor name/string --major/int --minor/int --patch/int=0:
     attempts/int? := null
+    scores/Map? := null
+
     catch: attempts = bucket_.get ATTEMPTS_KEY
+    catch: scores = bucket_.get SCORES_KEY
+
     attempts_ = attempts or 0
+    scores_ = OperatorScores ((scores is Map) ? scores.copy : {:})
+
     super "system/network/cellular/$name" --major=major --minor=minor --patch=patch
     // The network starts closed, so we let the state of the cellular
     // container indicate that it is running in the background until
@@ -98,9 +111,16 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
     provides CellularStateService.SELECTOR --handler=(CellularStateServiceHandler_ this)
 
   update_attempts_ value/int -> int:
-    bucket_[ATTEMPTS_KEY] = value
-    attempts_ = value
+    critical_do:
+      catch: with_timeout --ms=10_000:
+        bucket_[ATTEMPTS_KEY] = value
+        attempts_ = value
     return value
+
+  update_scores_:
+    critical_do:
+      catch: with_timeout --ms=10_000:
+        bucket_[SCORES_KEY] = scores_.to_map
 
   handle index/int arguments/any --gid/int --client/int -> any:
     if index == CellularService.CONNECT_INDEX:
@@ -160,25 +180,33 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
         driver.configure apn --bands=bands --rats=rats
         logger.info "enabling radio"
         driver.enable_radio
-        
+
       // Scans can take up to 3 minutes on u-blox SARA
       with_timeout --ms=180_000:
-        // After the CELLULAR_FAILS_UNTIL_SCAN threshold has passed,
-        // we initiate a scan every third attempt to limit collisions
-        // with reset attempts.
-        if (attempts_ > CELLULAR_FAILS_UNTIL_SCAN) and (attempts_ % 3 == 0):
-          logger.info "scanning for operators" --tags={"attempt": attempts_}
-          operators := driver.scan_for_operators
-          // TODO: Track which operators always fail and blacklist them
-          // or select other ones manually to prevent reselection of
-          // non-functional operators.
+        catch --trace:
+
+          // If we have tried to connect without succes more than
+          // 32 times, reset the scores.
+          if (attempts_ > 0 and attempts_ % 32 == 0): 
+            scores_.reset_all
+
+          // If the score of the operator connected last is below the limit,
+          // manually connect to a new one, if there exists one with a higher score than the last.
+          print "scores_.score_for_last_operator=$scores_.score_for_last_operator  scores_=$scores_.to_map  attempts_=$attempts_"
+          if scores_.score_for_last_operator < 75 or scores_.operators.size == 0 or (attempts_ > CELLULAR_FAILS_UNTIL_SCAN):
+            logger.info "last operator score below limit or no operators available"
+            if (scores_.operators.size == 0) or ((attempts_ > CELLULAR_FAILS_UNTIL_SCAN) and (attempts_ % 3 == 0)):
+              logger.info "scanning for operators" --tags={"attempt": attempts_}
+              scores_.set_available_operators driver.scan_for_operators
+            operator_ = scores_.get_best_operator
 
       // Connects can take up to 3 minutes on u-blox SARA
       with_timeout --ms=180_000:
         logger.info "connecting"
-        driver.connect
-      update-attempts_ 0  // Success. Reset the attempts.
+        driver.connect --operator=operator_
+      update_attempts_ 0  // Success. Reset the attempts.
       logger.info "connected"
+      connected_at_ = esp32.total_run_time
       // Once the network is established, we change the state of the
       // cellular container to indicate that it is now running in
       // the foreground and needs to have its proxied networks closed
@@ -277,7 +305,7 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
         // Turning the cellular modem on failed, so we artificially
         // bump the number of attempts to get close to a reset.
         if attempts_until_reset > 1:
-          critical_do: update_attempts_ attempts + attempts_until_reset - 1
+          update_attempts_ attempts + attempts_until_reset - 1
         // Close the UART before closing the pins. This is typically
         // taken care of by a call to driver.close, but in this case
         // we failed to produce a working driver instance.
@@ -289,7 +317,35 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
     log_level := error ? log.WARN_LEVEL : log.INFO_LEVEL
     log_tags := error ? { "error": error } : null
     try:
-      log.log log_level "closing" --tags=log_tags
+      catch --trace: with-timeout --ms=10_000:
+        disconnected_at_ = esp32.total_run_time
+        log.log log_level "closing" --tags=log_tags
+        
+        // Update score of used operator
+        time_to_error := (connected_at_ is int) ?  ((disconnected_at_ - connected_at_)*0.000001).round : 0
+        tte_score := (error /*and "$error" != "CANCELED"*/) ? time_to_error : ACCEPTABLE_TIME_TO_ERROR
+        // if ("$error" == "CANCELED"): tte_score = ACCEPTABLE_TIME_TO_ERROR / 2 // TODO: Is this the right way to handle this?
+
+        // Get the currently active operator in order to score it properly.
+        // If operator_ was defined during connection, use that. Otherwise,
+        // we try to query the modem for the currently connected operator.
+        // If that fails, we assume that the operator is the same as the last
+        // (which is almost always the case) and pull it from the last session
+        // in the scores_.
+        operator := operator_
+        if not operator:
+          catch: with-timeout --ms=2_000: 
+            operator = driver.get_connected_operator
+        if not operator:
+          operator = scores_.get_last_operator
+
+        // If we have an operator, we score it.
+        if operator:
+          scores_.add --tte=tte_score --time=Time.now --operator=operator
+          update_scores_
+          print "Saved scores to flash! scores_.to_map=$scores_.to_map"
+
+      // Close the driver
       catch: with_timeout --ms=20_000: driver.close
       if rts_:
         rts_.configure --output
@@ -390,3 +446,110 @@ class CellularStateServiceHandler_ implements ServiceHandler CellularStateServic
     driver := provider.driver_
     if not driver: return null
     return driver.version
+
+
+class OperatorScores:
+  static RESET-SCORE ::= 90.0
+  operator_scores_/Map? := null
+
+  constructor operator_scores/Map?:
+    operator_scores_ = operator_scores or {:}
+
+  add --tte/int --time/Time --operator/Operator -> none:
+    print "OperatorScores.add tte=$tte time=$time operator=$operator"
+    last_operator_session := operator_scores_.get operator.op --if-absent=: {:}
+    if last_operator_session is not Map: last_operator_session = {:}
+    last_score := last_operator_session.get "score" --if_absent=: RESET-SCORE
+    tte = (tte > ACCEPTABLE_TIME_TO_ERROR) ? ACCEPTABLE_TIME_TO_ERROR : tte
+    new_score := (0.2*(tte/ACCEPTABLE-TIME-TO-ERROR)*100.0 + 0.8*last_score)
+    operator_scores_[operator.op] = {"tte": tte, "time": time.s-since-epoch, "score": new_score, "available": true}
+
+  reset_all:
+    operator_scores_ = {:}
+
+  reset_scores:
+    operator_scores_.do: | op session |
+      session["score"] = RESET-SCORE
+
+  operators -> List:
+    return operator_scores_.keys
+
+  set_available_operators operators/List -> none:
+    print "set_available_operators operators=$operators"
+    operators_to_remove := []
+    operators_codes := operators.map: | operator | operator.op
+    operator_scores_.do: | op |
+      if not operators_codes.contains op: operators_to_remove.add op
+    operators_to_remove.do: | op |
+      operator_scores_[op]["available"] = false
+
+    operators_codes.do: | op |
+      if not operator_scores_.contains op: operator_scores_[op] = {"available": true}
+
+    // If more than X operators are in the map, remove the oldest one that's not available
+    if operators.size > 32:
+      oldest_unavailable := null
+      oldest_unavailable_time := 0
+      operator_scores_.do: | op session |
+        if not (session.get "available" --if_absent=: true):
+          session_time := session.get "time" --if_absent=: 0
+          if session_time > oldest_unavailable_time:
+            oldest_unavailable_time = session_time
+            oldest_unavailable = op
+      if oldest_unavailable: 
+        operator_scores_.remove oldest_unavailable
+
+  get_best_operator -> Operator?:
+    print "get_best_operator operator_scores_=$operator_scores_"
+    best_op := null
+    best_score := 0
+    operator_scores_.do: | op session |
+      available := (session is Map) ? (session.get "available" --if_absent=: true) : true
+      if available:
+        score := (session is Map) ? (session.get "score" --if_absent=: RESET-SCORE) : RESET-SCORE
+        print "get_best_operator op=$op score=$score"
+        if score > best_score:
+          best_score = score
+          best_op = op
+
+    print "get_best_operator best_op=$best_op best_score=$best_score"
+    return (best_op == null) ? null : (Operator best_op)
+
+  to_map -> Map:
+    return operator_scores_
+
+  get_last_session_ -> Map?:
+    if not operator_scores_: return null
+    last_session := null
+    last_session_time := 0
+    operator_scores_.do: | op session |
+      if session is Map:
+        session_time := session.get "time" --if_absent=: 0
+        if session_time > last_session_time:
+          last_session_time = session_time
+          last_session = session
+    return last_session
+
+  get_last_operator -> Operator?:
+    if not operator_scores_: return null
+    last_session_time := 0
+    last_op := ""
+    operator_scores_.do: | op session |
+      if session is Map:
+        session_time := session.get "time" --if_absent=: 0
+        if session_time > last_session_time:
+          last_session_time = session_time
+          last_op = op
+    return (last_op is string) ? (Operator last_op) : null
+
+  score_for_last_operator -> float:
+    session := get_last_session_
+    print "score_for_last_operator session=$session"
+
+    // If there is no last session, return 0 to indicate that 
+    // we should scan for operators.
+    if not session: return 0.0
+
+    // If there is a sessions but it doesn't have a score yet,
+    // return 100 to prioritize it.
+    return (session.get "score" --if_absent=: RESET-SCORE).to_float
