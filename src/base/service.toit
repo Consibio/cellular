@@ -504,7 +504,7 @@ class CellularStateServiceHandler_ implements ServiceHandler CellularStateServic
 
 
 class OperatorScores:
-  static RESET-SCORE ::= 90.0
+  static RESET-SCORE ::= OPERATOR_SCORE_THRESHOLD + 1.0
   operator_scores_/Map? := null
 
   constructor operator_scores/Map?:
