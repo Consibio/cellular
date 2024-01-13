@@ -84,6 +84,9 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
   static ATTEMPTS_KEY ::= "attempts"
   static SIGNAL_QUAL_KEY ::= "signal.qual"
   static SIGNAL_POWER_KEY ::= "signal.pwr"
+  static ICCID_KEY ::= "iccid"
+  static MODEL_KEY ::= "model"
+  static VERSION_KEY ::= "version"
   static SCORES_KEY ::= "operator.scores"
   bucket_/storage.Bucket ::= storage.Bucket.open --flash "toitware.com/cellular"
   attempts_/int := ?
@@ -177,6 +180,12 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
 
     try:
       with_timeout --ms=30_000:
+        // Get iccid, model and version and cache them
+        catch: with-timeout --ms=5_000:
+          update_cached_iccid driver.iccid
+          update_cached_model driver.model
+          update_cached_version driver.version
+
         logger.info "configuring modem" --tags={"apn": apn}
         driver.configure apn --bands=bands --rats=rats
         logger.info "enabling radio"
@@ -443,6 +452,28 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
     bucket_[SIGNAL_QUAL_KEY] = signal_quality.quality
     bucket_[SIGNAL_POWER_KEY] = signal_quality.power
 
+  get_cached_iccid -> string?:
+    iccid := bucket_.get ICCID_KEY
+    return iccid ? iccid : null
+  
+  update_cached_iccid iccid/string:
+    bucket_[ICCID_KEY] = iccid
+
+  get_cached_model -> string?:
+    model := bucket_.get MODEL_KEY
+    return model ? model : null
+
+  update_cached_model model/string:
+    bucket_[MODEL_KEY] = model
+
+  get_cached_version -> string?:
+    version := bucket_.get VERSION_KEY
+    return version ? version : null
+
+  update_cached_version version/string:
+    bucket_[VERSION_KEY] = version
+
+
 class CellularStateServiceHandler_ implements ServiceHandler CellularStateService:
   provider/CellularServiceProvider
   constructor .provider:
@@ -455,31 +486,21 @@ class CellularStateServiceHandler_ implements ServiceHandler CellularStateServic
     unreachable
 
   quality cache/bool=true -> any:
-    driver := provider.driver_
     result := null
-    if not driver:
-      catch: 
-        result = provider.get_cached_signal_quality
-    else if cache:
-      result = driver.signal_quality
-      if result:
-        provider.update_cached_signal_quality result
+    catch: result = provider.get_cached_signal_quality
     return result ? [ result.power, result.quality ] : null
 
   iccid -> string?:
-    driver := provider.driver_
-    if not driver: return null
-    return driver.iccid
+    catch: return provider.get_cached_iccid
+    return null
 
   model -> string?:
-    driver := provider.driver_
-    if not driver: return null
-    return driver.model
+    catch: return provider.get_cached_model
+    return null
 
   version -> string?:
-    driver := provider.driver_
-    if not driver: return null
-    return driver.version
+    catch: return provider.get_cached_version
+    return null
 
 
 class OperatorScores:
