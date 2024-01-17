@@ -5,6 +5,7 @@
 import gpio
 import uart
 import log
+import esp32
 
 import net
 import net.cellular
@@ -21,8 +22,9 @@ import system.storage
 
 import .cellular
 import ..api.state
+import ..api.config
 import ..state
-import esp32
+import ..config
 
 CELLULAR_FAILS_BETWEEN_RESETS /int ::= 8
 CELLULAR_FAILS_UNTIL_SCAN  /int ::= 2
@@ -88,6 +90,13 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
   static MODEL_KEY ::= "model"
   static VERSION_KEY ::= "version"
   static SCORES_KEY ::= "operator.scores"
+
+  // Flash-backed parameters, that can be used to override
+  // the default configuration.
+  static CONFIG_APN_KEY ::= cellular.CONFIG_APN
+  static CONFIG_PIN_CODE_KEY ::= "config.pin_code"
+  static OVERRIDABLE_CONFIG_KEYS ::= [CONFIG_APN_KEY, CONFIG_PIN_CODE_KEY]
+
   bucket_/storage.Bucket ::= storage.Bucket.open --flash "toitware.com/cellular"
   attempts_/int := ?
   scores_/OperatorScores := ?
@@ -113,6 +122,7 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
         --tags=["cellular"]
     provides CELLULAR_SELECTOR --handler=this
     provides CellularStateService.SELECTOR --handler=(CellularStateServiceHandler_ this)
+    provides CellularConfigService.SELECTOR --handler=(CellularConfigServiceHandler_ this)
 
   update_attempts_ value/int -> int:
     critical_do:
@@ -156,6 +166,13 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
     // the current configuration. Should we pass it through to $open_network
     // somehow instead?
     config_ = config
+
+    // Override the config with the overridable configuration parameters
+    // if they are present in the bucket.
+    OVERRIDABLE_CONFIG_KEYS.do: | key |
+      value := bucket_.get key
+      if value: config_[key] = value
+
     return connect client
 
   proxy_mask -> int:
@@ -473,6 +490,13 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
   update_cached_version version/string:
     bucket_[VERSION_KEY] = version
 
+  set-and-cache-apn apn/string:
+    bucket_[CONFIG_APN_KEY] = apn
+    config_[CONFIG_APN_KEY] = apn
+
+  set-and-cache-pin-code pin-code/string:
+    bucket_[CONFIG_PIN_CODE_KEY] = pin_code
+
 
 class CellularStateServiceHandler_ implements ServiceHandler CellularStateService:
   provider/CellularServiceProvider
@@ -500,6 +524,24 @@ class CellularStateServiceHandler_ implements ServiceHandler CellularStateServic
 
   version -> string?:
     catch: return provider.get_cached_version
+    return null
+
+
+class CellularConfigServiceHandler_ implements ServiceHandler CellularConfigService:
+  provider/CellularServiceProvider
+  constructor .provider:
+
+  handle index/int arguments/any --gid/int --client/int -> any:
+    if index == CellularConfigService.APN_INDEX: return set-apn arguments
+    if index == CellularConfigService.PIN_INDEX: return set-pin-code arguments
+    unreachable
+
+  set-apn apn/string:
+    catch: return provider.set-and-cache-apn apn
+    return null
+
+  set-pin-code pin/string:
+    catch: return provider.set-and-cache-pin-code pin
     return null
 
 
