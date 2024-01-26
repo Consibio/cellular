@@ -165,6 +165,9 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
     level := config_.get cellular.CONFIG_LOG_LEVEL --if_absent=: log.INFO_LEVEL
     logger := log.Logger level log.DefaultTarget --name="cellular"
 
+    // Reset the selected operator
+    operator_ = null
+
     driver/Cellular? := null
     catch: driver = open_driver logger
     // If we failed to create the driver, it may very well be
@@ -236,6 +239,7 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
               // performed at least one time.
               if scores_.score_for_last_operator < OPERATOR_SCORE_THRESHOLD or should_scan:
                 operator_ = scores_.get_best_operator
+                print "Using operator $operator_.op with score $(%.2f scores_.score_for_last_operator)%"
 
         // Connects can take up to 3 minutes on u-blox SARA
         with_timeout --ms=180_000:
@@ -250,10 +254,10 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
       // to be able to provide it a score after the session. It is
       // more reliable to query the modem here after the shutdown
       // procedure is underway.
-      if operator_ == null:
+      /* if operator_ == null:
         catch:
           with_timeout --ms=5_000:
-            operator_ = driver.get_connected_operator
+            operator_ = driver.get_connected_operator */
 
       connected_at_ = esp32.total_run_time
       // Once the network is established, we change the state of the

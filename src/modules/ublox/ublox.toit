@@ -665,9 +665,27 @@ class Interface_ extends CloseableNetwork implements net.Interface:
       return [net.IpAddress.parse host]
 
     // Async resolve is not supported on this device.
-    res := cellular_.at_.do: it.send
-      UDNSRN.sync host
-    return res.single.map: net.IpAddress.parse it
+    print "Resolving host=$host"
+    result := null
+
+    /* 10.repeat:
+      print "CSQ before resolve = $(cellular_.at_.do: it.action "+CSQ")"
+      print "connected operator = $(cellular_.at_.do: it.read "+COPS")" */
+  
+    attempts := 0
+    
+    while attempts<10:
+      attempts++
+      catch --trace:
+        res := cellular_.at_.do: it.send
+          UDNSRN.sync host
+        print "res=$res res.single=$res.single"
+        result = res.single.map: net.IpAddress.parse it
+        print "result=$result"
+        //return result
+        break
+        sleep --ms=1000
+    return result
 
   udp_open --port/int?=null -> udp.Socket:
     if port and port != 0: throw "cannot bind to custom port"
