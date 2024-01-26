@@ -165,6 +165,9 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
     level := config_.get cellular.CONFIG_LOG_LEVEL --if_absent=: log.INFO_LEVEL
     logger := log.Logger level log.DefaultTarget --name="cellular"
 
+    // Reset the selected operator
+    operator_ = null
+
     driver/Cellular? := null
     catch: driver = open_driver logger
     // If we failed to create the driver, it may very well be
