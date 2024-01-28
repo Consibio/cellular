@@ -26,6 +26,8 @@ import esp32
 
 CELLULAR_FAILS_BETWEEN_RESETS /int ::= 8
 CELLULAR_FAILS_UNTIL_SCAN  /int ::= 4
+CELLULAR_FAILS_UNTIL_SCORE_RESET /int ::= 32
+CELLULAR_FAILS_UNTIL_FACTORY_RESET /int ::= CELLULAR_FAILS_UNTIL_SCORE_RESET - 1
 ACCEPTABLE_TIME_TO_ERROR /int ::= 300 // seconds = 5 minutes
 OPERATOR_SCORE_THRESHOLD /int ::= 75
 
@@ -183,6 +185,15 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
 
     try:
       critical-do:
+        // Perform factory reset, if we have tried to connect without
+        // success more than 31 times (we offset it by 1 to ensure that
+        // we don't reset and scan on the same attempt, as that takes
+        // too long).
+        if attempts_ > 0 and attempts_ % CELLULAR_FAILS_UNTIL_FACTORY_RESET == 0:
+          logger.info "performing factory reset"
+          driver.factory_reset
+          with_timeout --ms=20_000: driver.wait_for_ready
+
         // Get iccid, model and version and cache them
         catch: with-timeout --ms=5_000:
           update_cached_iccid driver.iccid
@@ -210,7 +221,7 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
             // If we have tried to connect without succes more than
             // 32 times, reset the scores to ensure that we are not
             // stuck, if some scoring logic is broken.
-            if (attempts_ > 0 and attempts_ % 32 == 0): 
+            if (attempts_ > 0 and attempts_ % CELLULAR_FAILS_UNTIL_SCORE_RESET == 0): 
               scores_.reset_all
 
             // Every other attempt, we rely on the modem's automatic
@@ -254,10 +265,10 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
       // to be able to provide it a score after the session. It is
       // more reliable to query the modem here after the shutdown
       // procedure is underway.
-      /* if operator_ == null:
+      if operator_ == null:
         catch:
           with_timeout --ms=5_000:
-            operator_ = driver.get_connected_operator */
+            operator_ = driver.get_connected_operator
 
       connected_at_ = esp32.total_run_time
       // Once the network is established, we change the state of the
