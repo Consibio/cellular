@@ -40,6 +40,8 @@ abstract class CellularBase implements Cellular:
 
   is_lte_connection_ := false
 
+  registered_on_network_ := false
+
   constructor
       .uart_
       .at_session_
@@ -215,60 +217,114 @@ abstract class CellularBase implements Cellular:
       if session: session.action "" --no-check
       else: at_.do: it.action "" --no-check
 
-  connect_ session/at.Session --operator/Operator? --psm/bool -> none:
-    failed_to_connect = true
-    is_lte_connection_ = false
+  connect_ session/at.Session --operator/Operator? --psm/bool --reattach/bool=false -> none:
+    connection_attempt := 0
+    while connection_attempt < 8:
+      if reattach:
+        logger.debug "reattach attempt=$connection_attempt"
+      err := catch --trace:
+        failed_to_connect = true
+        is_lte_connection_ = false
+        network_registered := false
 
-    done := monitor.Latch
-    registrations := { "+CEREG" }
-    if support_gsm_: registrations.add "+CGREG"
-    failed := {}
+        done := monitor.Latch
+        registrations := { "+CEREG" }
+        if support_gsm_: registrations.add "+CGREG"
+        failed := {}
 
-    registrations.do: | command/string |
-      session.register_urc command::
-        state := it.first
-        if state == 1 or state == 5:
-          failed.remove command
-          done.set command
-        else if state == 3 or state == 80:
-          failed.add command
-          error := state == 3 ? REGISTRATION_DENIED_ERROR : "connection lost"
-          // If all registrations have failed, we report the last error.
-          if failed.size == registrations.size: done.set --exception error
+        // Register a callback handler for the URC (Unsolicited 
+        // Result Code) returned by the modem when network
+        // registration status changes.
+        registrations.do: | command/string |
+          catch --trace:
+            session.register_urc command::
+              state := it.first
 
-    try:
-      // Enable registration events.
-      registrations.do: session.set it [2]
+              // If we get a 1 or 5, we're registered on the network.
+              // 1 = registered, home network
+              // 5 = registered, roaming
+              if state == 1 or state == 5:
+                failed.remove command
+                done.set command
+                registered_on_network_ = true
 
-      if not psm:
-        result := send_abortable_ session COPS.read
-        cur_cops := result.single
-        cur_mode := cur_cops[0]
+              // If we get a 3, registration has been denied.
+              else if state == 3 or state == 80:
+                failed.add command
+                error := state == 3 ? REGISTRATION_DENIED_ERROR : "connection lost"
+                // If all registrations have failed, we report the last error.
+                if failed.size == registrations.size: done.set --exception error
+                registered_on_network_ = false
 
-        // If operator is defined, do manual operator selection.
-        // Otherwise, only set new COPS value if it's not currently
-        // set to automatic mode. Calling COPS=0 every time takes 
-        // much longer.
-        command := null
-        if operator:
-          command = COPS.manual operator.op --rat=operator.rat
-        else if cur_mode != COPS.MODE_AUTOMATIC:
-          command = COPS.automatic
-        
-        if command:
-          send_abortable_ session command
+              // If we get a 0 we're not registered, so we should try again.
+              else if state==0:
+                logger.debug "no longer registered on network"
+                registered_on_network_ = false
 
-      wait_for_urc_ --session=session:
-        if done.get == "+CGREG":
-          is_lte_connection_ = true
-          use_psm = false
+        try:
+          // Enable registration events.
+          registrations.do: session.set it [2]
 
-    finally:
-      // TODO(kasper): Should we unregister the interest in the events?
-      registrations.do: session.unregister_urc it
+          if not psm:
+            // If the connection attempt is a reattach (ie. not a new
+            // operator connection), then the modem is configured, and
+            // we just ned a new network registration. We try to force 
+            // it by disabling and enabling the radio.
+            if reattach:
+              if not registered_on_network_:
+                logger.debug "toggling radio to force network registration..."
+                catch --trace:
+                  send_abortable_ session (CFUN.offline)
+                catch --trace:
+                  send_abortable_ session (CFUN.online)
 
-    on_connected_ session
-    failed_to_connect = false
+            // If this a new connection attempt, we need to set
+            // control the operator selection settings.
+            else:
+              command := null
+              result := send_abortable_ session COPS.read
+              cur_cops := result.single
+              cur_mode := cur_cops[0]
+
+              // If operator is defined, do manual operator selection.
+              // Otherwise, only set new COPS value if it's not currently
+              // set to automatic mode. Calling COPS=0 every time takes 
+              // much longer.
+              if operator:
+                command = COPS.manual operator.op --rat=operator.rat
+              else if cur_mode != COPS.MODE_AUTOMATIC:
+                command = COPS.automatic
+              if command:
+                send_abortable_ session command
+
+          // Wait for network registration.
+          logger.debug "waiting for urc..."
+          wait_for_urc_ --session=session:
+            if done.get == "+CGREG":
+              is_lte_connection_ = true
+              use_psm = false
+
+          // Activate the PDP context.
+          on_connected_ session
+          failed_to_connect = false
+
+          // We test the IP stack here before releasing it
+          // to ensure that it's working. If it's not, the
+          // reattempt loop will trigger again as a reaattach
+          logger.debug "testing DNS lookup..."
+          google_ip := session.set "+UDNSRN" [0, "google.com"] --timeout=(Duration --s=130)
+
+        finally:
+          // TODO(kasper): Should we unregister the interest in the events?
+          registrations.do: session.unregister_urc it
+
+        return
+      
+      // If an error occured, we try to reattach.
+      if err:
+        logger.debug "Connection error: $err"
+        reattach = true
+      connection_attempt += 1
 
   send_abortable_ session/at.Session command/at.Command -> at.Result:
     try:
