@@ -616,6 +616,12 @@ abstract class UBloxCellular extends CellularBase:
     at_.do: | session/at.Session |
       set_mno_ session 0
 
+  factory_reset -> none:
+    at_.do: | session/at.Session |
+      session.set "+UFACTORY" [2,2] --timeout=(Duration --s=5)
+      session.read "+UFACTORY" --timeout=(Duration --s=5)
+      session.set "+CFUN" [16] --timeout=(Duration --s=180)
+
   reboot_ session/at.Session:
     on_reset session
     // Rebooting the module should get it back into a ready state. We avoid
@@ -665,27 +671,9 @@ class Interface_ extends CloseableNetwork implements net.Interface:
       return [net.IpAddress.parse host]
 
     // Async resolve is not supported on this device.
-    print "Resolving host=$host"
-    result := null
-
-    /* 10.repeat:
-      print "CSQ before resolve = $(cellular_.at_.do: it.action "+CSQ")"
-      print "connected operator = $(cellular_.at_.do: it.read "+COPS")" */
-  
-    attempts := 0
-    
-    while attempts<10:
-      attempts++
-      catch --trace:
-        res := cellular_.at_.do: it.send
-          UDNSRN.sync host
-        print "res=$res res.single=$res.single"
-        result = res.single.map: net.IpAddress.parse it
-        print "result=$result"
-        //return result
-        break
-        sleep --ms=1000
-    return result
+    res := cellular_.at_.do: it.send
+      UDNSRN.sync host
+    return res.single.map: net.IpAddress.parse it
 
   udp_open --port/int?=null -> udp.Socket:
     if port and port != 0: throw "cannot bind to custom port"

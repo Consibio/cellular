@@ -289,6 +289,7 @@ abstract class CellularBase implements Cellular:
   power_on -> none:
   power_off -> none:
   reset -> none:
+  factory_reset -> none:
   is_powered_off -> bool?:
     return null
 
