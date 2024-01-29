@@ -88,22 +88,29 @@ class SaraR5 extends UBloxCellular:
       // The PDP profile is already active. Trying to change it is
       // an illegal operation at this point.
       return
-
-    // Set Primary DNS server to one of Google's DNS servers.
+ 
+    // Set DNS servers to one of Google's DNS servers.
     // If left untouched, the network will normally provide it,
-    // but we have seen that this is not always the case (TDC).
-    // We leave the secondary DNS server untouched to use the
-    // network provided one as a fallback.
-    upsd_set_dns_target := [0, 4, "8.8.8.8"]
-/*     upsd_set_dns := session.set "+UPSD" upsd_set_dns_target[0..2]
-    if not list_equals_ upsd_set_dns.last upsd_set_dns_target: */
-    session.set "+UPSD" upsd_set_dns_target
+    // but we have seen that the this can be unreliable for some
+    // networks (e.g. Telenor DK and TDC DK)
+    if not registered_on_network_: throw "not registered on network"
+    session.set "+UPSD" [0, 4, "8.8.8.8"] --timeout=(Duration --s=150)
+    session.set "+UPSD" [0, 5, "8.8.4.4"] --timeout=(Duration --s=150)
 
-    // Map PSD profile id 0 to PDP context ID (cid) 1
-    upsd_map_cid_target := [0, 100, 1]
-/*     upsd_map_cid := session.set "+UPSD" upsd_map_cid_target[0..2]
-    if not list_equals_ upsd_map_cid.last upsd_map_cid_target: */
-    session.set "+UPSD" upsd_map_cid_target
+    // Activate PDP context 1.
+    if not registered_on_network_: throw "not registered on network"
+    session.set "+CGACT" [1, 1] --timeout=(Duration --s=150)
+
+    //TODO: Handle handling of IP protocol type depending on 
+    // product version. From the Internet Applications dev guide:
+    // For SARA-R5 "00B" product version, what matters is the 
+    // protocol type set when issuing the +CGDCONT set command, 
+    // and not what is provided as the response of the +CGDCONT 
+    // read command, which could be different. In the opposite 
+    // manner, for SARA-R5 "01B" product version and onwards, 
+    // the internal PSD profile must set a protocol type exactly 
+    // as read in the +CGDCONT AT command after registration 
+    // to the network.
 
     // Set the protocol type to IPv4.
     // Possible options are:
@@ -111,14 +118,17 @@ class SaraR5 extends UBloxCellular:
     //    1: IPv6
     //    2: IPv4v6 with IPv4 preferred for internal sockets
     //    3: IPv4v6 with IPv6 preferred for internal sockets
-    upsd_protocol_target := [0, 0, 0]
-   /*  upsd_protocol := session.set "+UPSD" upsd_protocol_target[0..2]
-    if not list_equals_ upsd_protocol.last upsd_protocol_target: */
-    session.set "+UPSD" upsd_protocol_target
- 
-    // Activate the PDP context.
+    if not registered_on_network_: throw "not registered on network"
+    session.set "+UPSD" [0, 0, 0]
+
+    // Map PSD profile id 0 to PDP context ID (cid) 1
+    if not registered_on_network_: throw "not registered on network"
+    session.set "+UPSD" [0, 100, 1]
+
+    // Activate the PSD profile #0.
     // This should be called each time. If not called
     // the subsequent USOCR (socket create) will fail.
+    if not registered_on_network_: throw "not registered on network"
     send_abortable_ session (UPSDA --action=3)
 
   psm_enabled_psv_target -> List:

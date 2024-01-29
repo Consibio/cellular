@@ -27,7 +27,9 @@ import ..state
 import ..config
 
 CELLULAR_FAILS_BETWEEN_RESETS /int ::= 8
-CELLULAR_FAILS_UNTIL_SCAN  /int ::= 2
+CELLULAR_FAILS_UNTIL_SCAN  /int ::= 4
+CELLULAR_FAILS_UNTIL_SCORE_RESET /int ::= 32
+CELLULAR_FAILS_UNTIL_FACTORY_RESET /int ::= CELLULAR_FAILS_UNTIL_SCORE_RESET - 1
 ACCEPTABLE_TIME_TO_ERROR /int ::= 300 // seconds = 5 minutes
 OPERATOR_SCORE_THRESHOLD /int ::= 75
 
@@ -182,6 +184,9 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
     level := config_.get cellular.CONFIG_LOG_LEVEL --if_absent=: log.INFO_LEVEL
     logger := log.Logger level log.DefaultTarget --name="cellular"
 
+    // Reset the selected operator
+    operator_ = null
+
     driver/Cellular? := null
     catch: driver = open_driver logger
     // If we failed to create the driver, it may very well be
@@ -196,53 +201,79 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
     rats := config_.get cellular.CONFIG_RATS
 
     try:
-      with_timeout --ms=30_000:
+      critical-do:
+        // Perform factory reset, if we have tried to connect without
+        // success more than 31 times (we offset it by 1 to ensure that
+        // we don't reset and scan on the same attempt, as that takes
+        // too long).
+        if attempts_ > 0 and attempts_ % CELLULAR_FAILS_UNTIL_FACTORY_RESET == 0:
+          logger.info "performing factory reset"
+          driver.factory_reset
+          with_timeout --ms=20_000: driver.wait_for_ready
+
         // Get iccid, model and version and cache them
         catch: with-timeout --ms=5_000:
           update_cached_iccid driver.iccid
           update_cached_model driver.model
           update_cached_version driver.version
 
-        logger.info "configuring modem" --tags={"apn": apn}
-        driver.configure apn --bands=bands --rats=rats
-        logger.info "enabling radio"
-        driver.enable_radio
+        // The CFUN command (called in both driver.configure where
+        // the modem is disable with CFUN=0 and then enabled again
+        // in driver.enable_radio) can take up to 3 minutes. However,
+        // it ususally takes less than 1 seconds. We set the timeout
+        // to 3 minutes to ensure that we don't stop the disabling
+        // procedure prematurely, as we have observed that it can 
+        // leave the modem in a bad state.
+        print "enabling radio with timeout of 180_000 seconds..."
+        with_timeout --ms=180_000:
+          logger.info "configuring modem" --tags={"apn": apn}
+          driver.configure apn --bands=bands --rats=rats
+          logger.info "enabling radio"
+          driver.enable_radio
 
-      // Scans can take up to 3 minutes on u-blox SARA
-      with_timeout --ms=180_000:
-        catch --trace:
+        // Scans can take up to 3 minutes on u-blox SARA
+        with_timeout --ms=180_000:
+          catch --trace:
 
-          // If we have tried to connect without succes more than
-          // 32 times, reset the scores to ensure that we are not
-          // stuck, if some scoring logic is broken.
-          if (attempts_ > 0 and attempts_ % 32 == 0): 
-            scores_.reset_all
+            // If we have tried to connect without succes more than
+            // 32 times, reset the scores to ensure that we are not
+            // stuck, if some scoring logic is broken.
+            if (attempts_ > 0 and attempts_ % CELLULAR_FAILS_UNTIL_SCORE_RESET == 0): 
+              scores_.reset_all
 
-          // If we have tried to connect without succes more than
-          // the number of times defined by CELLULAR_FAILS_UNTIL_SCAN,
-          // scan for operators.
-          should_scan := (attempts_ > CELLULAR_FAILS_UNTIL_SCAN) and (attempts_ % 3 == 0)
-          if (should_scan):
-            logger.info "scanning for operators" --tags={"attempt": attempts_}
-            scores_.set_available_operators driver.scan_for_operators
+            // Every other attempt, we rely on the modem's automatic
+            // operator selection. This is to ensure that we try out
+            // new operators properly before manually selecting a 
+            // new one.
+            if (attempts_ % 2 == 0):
 
-          // If the score of the operator connected last is below 
-          // the OPERATOR_SCORE_THRESHOLD, manually connect to a 
-          // new one, if there exists one with a higher score than 
-          // the last. Also do this if we have just scanned for 
-          // operators to ensure that we try out newly discovered
-          // operators. 
-          // If no known scores are known, score_for_last_operator 
-          // will return 0, but get_best_operator will return null,
-          // so it will attempt auto-COPS until a scan has been
-          // performed at least one time.
-          if scores_.score_for_last_operator < OPERATOR_SCORE_THRESHOLD or should_scan:
-            operator_ = scores_.get_best_operator
+              // If we have tried to connect without succes more than
+              // the number of times defined by CELLULAR_FAILS_UNTIL_SCAN,
+              // scan for operators on every 4th attempt.
+              should_scan := (attempts_ > CELLULAR_FAILS_UNTIL_SCAN) and (attempts_ % 4 == 0)
+              if (should_scan):
+                logger.info "scanning for operators" --tags={"attempt": attempts_}
+                scores_.set_available_operators driver.scan_for_operators
 
-      // Connects can take up to 3 minutes on u-blox SARA
-      with_timeout --ms=180_000:
-        logger.info "connecting"
-        driver.connect --operator=operator_
+              // If the score of the operator connected last is below 
+              // the OPERATOR_SCORE_THRESHOLD, manually connect to a 
+              // new one, if there exists one with a higher score than 
+              // the last. Also do this if we have just scanned for 
+              // operators to ensure that we try out newly discovered
+              // operators. 
+              // If no known scores are known, score_for_last_operator 
+              // will return 0, but get_best_operator will return null,
+              // so it will attempt auto-COPS until a scan has been
+              // performed at least one time.
+              if scores_.score_for_last_operator < OPERATOR_SCORE_THRESHOLD or should_scan:
+                operator_ = scores_.get_best_operator
+                print "Using operator $operator_.op with score $(%.2f scores_.score_for_last_operator)%"
+
+        // Connects can take up to 3 minutes on u-blox SARA
+        with_timeout --ms=180_000:
+          logger.info "connecting"
+          driver.connect --operator=operator_
+          
       update_attempts_ 0  // Success. Reset the attempts.
       logger.info "connected"
 
@@ -392,10 +423,10 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
         // (which is almost always the case) and pull it from the last session
         // in the scores_.
         operator := operator_
-        if not operator:
+        /* if not operator:
           catch:
             with-timeout --ms=5_000: 
-              operator = driver.get_connected_operator
+              operator = driver.get_connected_operator */
         if not operator:
           operator = scores_.get_last_operator
 
