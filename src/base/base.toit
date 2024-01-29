@@ -222,7 +222,7 @@ abstract class CellularBase implements Cellular:
     while connection_attempt < 8:
       if reattach:
         logger.debug "reattach attempt=$connection_attempt"
-      err := catch --trace:
+      err := catch:
         failed_to_connect = true
         is_lte_connection_ = false
         network_registered := false
