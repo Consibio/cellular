@@ -534,13 +534,13 @@ class CellularStateServiceHandler_ implements ServiceHandler CellularStateServic
   constructor .provider:
 
   handle index/int arguments/any --gid/int --client/int -> any:
-    if index == CellularStateService.QUALITY_INDEX: return quality arguments
+    if index == CellularStateService.QUALITY_INDEX: return quality
     if index == CellularStateService.ICCID_INDEX: return iccid
     if index == CellularStateService.MODEL_INDEX: return model
     if index == CellularStateService.VERSION_INDEX: return version
     unreachable
 
-  quality cache/bool=true -> any:
+  quality -> any:
     result := null
     catch: result = provider.get_cached_signal_quality
     return result ? [ result.power, result.quality ] : null

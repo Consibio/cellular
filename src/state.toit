@@ -12,10 +12,10 @@ class SignalQuality:
   quality/float?
   constructor --.power --.quality:
 
-quality --cache/bool=true -> SignalQuality?:
+quality -> SignalQuality?:
   service := service_
   if not service: throw "cellular unavailable"
-  return service.quality cache
+  return service.quality
 
 iccid -> string?:
   service := service_
