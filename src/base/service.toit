@@ -1,6 +1,7 @@
 // Copyright (C) 2022 Toitware ApS. All rights reserved.
 // Use of this source code is governed by an MIT-style license that can be
 // found in the LICENSE file.
+import system.trace show send-trace-message
 
 import gpio
 import uart
@@ -96,14 +97,16 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
   // Flash-backed parameters, that can be used to override
   // the default configuration.
   static CONFIG_APN_KEY ::= cellular.CONFIG_APN
+  static CONFIG_OPERATOR_KEY ::= "config.operator"
   static CONFIG_PIN_CODE_KEY ::= "config.pin_code"
-  static OVERRIDABLE_CONFIG_KEYS ::= [CONFIG_APN_KEY, CONFIG_PIN_CODE_KEY]
+  static OVERRIDABLE_CONFIG_KEYS ::= [CONFIG_APN_KEY, CONFIG_OPERATOR_KEY, CONFIG_PIN_CODE_KEY]
 
   bucket_/storage.Bucket ::= storage.Bucket.open --flash "toitware.com/cellular"
   attempts_/int := ?
   scores_/OperatorScores := ?
 
   constructor name/string --major/int --minor/int --patch/int=0:
+    print "CellularServiceProvider constructor called! id=$(random 1000)"
     attempts/int? := null
     scores/Map? := null
 
@@ -167,13 +170,18 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
     // TODO(kasper): This isn't a super elegant way of dealing with
     // the current configuration. Should we pass it through to $open_network
     // somehow instead?
-    config_ = config
+    config_ = config.copy
 
     // Override the config with the overridable configuration parameters
     // if they are present in the bucket.
     OVERRIDABLE_CONFIG_KEYS.do: | key |
-      value := bucket_.get key
-      if value: config_[key] = value
+      catch --trace:
+        value := bucket_.get key
+        // Only override valid values:
+        if value is string and value.size > 0:
+          print "OVERRIDABLE_CONFIG_KEYS key=$key, value=$value"
+          config_[key] = value
+    print "config_=$config_"
 
     return connect client
 
@@ -196,83 +204,100 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
     // the modem communicate with us.
     if not driver: driver = open_driver logger
 
-    apn := config_.get cellular.CONFIG_APN --if_absent=: ""
+    apn := config_.get CONFIG_APN_KEY --if_absent=: ""
     bands := config_.get cellular.CONFIG_BANDS
     rats := config_.get cellular.CONFIG_RATS
+    configured_operator := config_.get CONFIG_OPERATOR_KEY --if-absent=:""
+    pin_code := config_.get CONFIG_PIN_CODE_KEY --if_absent=:""
+
+    print "apn=$apn bands=$bands rats=$rats configured_operator=$configured_operator pin_code=$pin_code"
 
     try:
-      critical-do:
-        // Perform factory reset, if we have tried to connect without
-        // success more than 31 times (we offset it by 1 to ensure that
-        // we don't reset and scan on the same attempt, as that takes
-        // too long).
-        if attempts_ > 0 and attempts_ % CELLULAR_FAILS_UNTIL_FACTORY_RESET == 0:
-          logger.info "performing factory reset"
-          driver.factory_reset
-          with_timeout --ms=20_000: driver.wait_for_ready
+      // Perform factory reset, if we have tried to connect without
+      // success more than 31 times (we offset it by 1 to ensure that
+      // we don't reset and scan on the same attempt, as that takes
+      // too long).
+      if attempts_ > 0 and attempts_ % CELLULAR_FAILS_UNTIL_FACTORY_RESET == 0:
+        logger.info "performing factory reset"
+        driver.factory_reset
+        with_timeout --ms=20_000: driver.wait_for_ready
 
-        // Get iccid, model and version and cache them
-        catch: with-timeout --ms=5_000:
-          update_cached_iccid driver.iccid
-          update_cached_model driver.model
-          update_cached_version driver.version
+      // Get iccid, model and version and cache them
+      /* catch: with-timeout --ms=5_000:
+        update_cached_iccid driver.iccid
+        update_cached_model driver.model
+        update_cached_version driver.version */
 
-        // The CFUN command (called in both driver.configure where
-        // the modem is disable with CFUN=0 and then enabled again
-        // in driver.enable_radio) can take up to 3 minutes. However,
-        // it ususally takes less than 1 seconds. We set the timeout
-        // to 3 minutes to ensure that we don't stop the disabling
-        // procedure prematurely, as we have observed that it can 
-        // leave the modem in a bad state.
-        print "enabling radio with timeout of 180_000 seconds..."
-        with_timeout --ms=180_000:
-          logger.info "configuring modem" --tags={"apn": apn}
-          driver.configure apn --bands=bands --rats=rats
-          logger.info "enabling radio"
-          driver.enable_radio
+      // The CFUN command (called in both driver.configure where
+      // the modem is disable with CFUN=0 and then enabled again
+      // in driver.enable_radio) can take up to 3 minutes. However,
+      // it ususally takes less than 1 seconds. We set the timeout
+      // to 3 minutes to ensure that we don't stop the disabling
+      // procedure prematurely, as we have observed that it can 
+      // leave the modem in a bad state.
+      with_timeout --ms=180_000:
+        logger.info "configuring modem" --tags={"apn": apn}
+        driver.configure apn --bands=bands --rats=rats
+        logger.info "enabling radio"
+        driver.enable_radio
 
-        // Scans can take up to 3 minutes on u-blox SARA
-        with_timeout --ms=180_000:
-          catch --trace:
+      // Scans can take up to 3 minutes on u-blox SARA
+      with_timeout --ms=180_000:
+        catch --trace:
+          configured_operator_is_valid := configured_operator is string and configured_operator.size > 4
+          print "configured_operator_is_valid=$configured_operator_is_valid attempts_=$attempts_"
+
+          // If we have tried to connect without succes more than
+          // 32 times, reset the scores to ensure that we are not
+          // stuck, if some scoring logic is broken. Only reset it
+          // if we are not using a configured operator, as we don't
+          // use the scores in that case.
+          if (not configured_operator_is_valid and attempts_ > 1 and attempts_ % CELLULAR_FAILS_UNTIL_SCORE_RESET == 0): 
+            scores_.reset_all
+
+          // If there is an operator forced by the configuration,
+          // just use that one and don't rely on the scoring mechanisms.
+          if configured_operator_is_valid:
+            operator_ = Operator configured_operator
+
+          // Every other attempt, we rely on the modem's automatic
+          // operator selection. This is to ensure that we try out
+          // new operators properly before manually selecting a 
+          // new one.
+          else if (attempts_ > 0 and attempts_ % 2 == 0):
+
+            // If there is no operator forced by the configuration,
+            // we rely on the scoring mechanisms to select the best
+            // operator.
 
             // If we have tried to connect without succes more than
-            // 32 times, reset the scores to ensure that we are not
-            // stuck, if some scoring logic is broken.
-            if (attempts_ > 0 and attempts_ % CELLULAR_FAILS_UNTIL_SCORE_RESET == 0): 
-              scores_.reset_all
+            // the number of times defined by CELLULAR_FAILS_UNTIL_SCAN,
+            // scan for operators on every 4th attempt.
+            should_scan := (attempts_ > CELLULAR_FAILS_UNTIL_SCAN) and (attempts_ % 4 == 0)
+            if (should_scan):
+              logger.info "scanning for operators" --tags={"attempt": attempts_}
+              scores_.set_available_operators driver.scan_for_operators
 
-            // Every other attempt, we rely on the modem's automatic
-            // operator selection. This is to ensure that we try out
-            // new operators properly before manually selecting a 
-            // new one.
-            if (attempts_ % 2 == 0):
-
-              // If we have tried to connect without succes more than
-              // the number of times defined by CELLULAR_FAILS_UNTIL_SCAN,
-              // scan for operators on every 4th attempt.
-              should_scan := (attempts_ > CELLULAR_FAILS_UNTIL_SCAN) and (attempts_ % 4 == 0)
-              if (should_scan):
-                logger.info "scanning for operators" --tags={"attempt": attempts_}
-                scores_.set_available_operators driver.scan_for_operators
-
-              // If the score of the operator connected last is below 
-              // the OPERATOR_SCORE_THRESHOLD, manually connect to a 
-              // new one, if there exists one with a higher score than 
-              // the last. Also do this if we have just scanned for 
-              // operators to ensure that we try out newly discovered
-              // operators. 
-              // If no known scores are known, score_for_last_operator 
-              // will return 0, but get_best_operator will return null,
-              // so it will attempt auto-COPS until a scan has been
-              // performed at least one time.
-              if scores_.score_for_last_operator < OPERATOR_SCORE_THRESHOLD or should_scan:
-                operator_ = scores_.get_best_operator
+            // If the score of the operator connected last is below 
+            // the OPERATOR_SCORE_THRESHOLD, manually connect to a 
+            // new one, if there exists one with a higher score than 
+            // the last. Also do this if we have just scanned for 
+            // operators to ensure that we try out newly discovered
+            // operators. 
+            // If no known scores are known, score_for_last_operator 
+            // will return 0, but get_best_operator will return null,
+            // so it will attempt auto-COPS until a scan has been
+            // performed at least one time.
+            if scores_.score_for_last_operator < OPERATOR_SCORE_THRESHOLD or should_scan:
+              operator_ = scores_.get_best_operator
+              if operator_:
                 print "Using operator $operator_.op with score $(%.2f scores_.score_for_last_operator)%"
 
-        // Connects can take up to 3 minutes on u-blox SARA
-        with_timeout --ms=180_000:
-          logger.info "connecting"
-          driver.connect --operator=operator_
+      // Connects can take up to 3 minutes on u-blox SARA
+      with_timeout --ms=180_000:
+        logger.info "connecting"
+        print "[CellularDebug] Connecting with operator_=$operator_ and apn=$apn"
+        driver.connect --operator=operator_
           
       update_attempts_ 0  // Success. Reset the attempts.
       logger.info "connected"
@@ -381,12 +406,17 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
         sleep --ms=1_000
       with_timeout --ms=20_000: driver.wait_for_ready
       return driver
-    finally: | is_exception _ |
+    finally: | is_exception exception |
       if is_exception:
+        print "CellularServiceProvider.open_driver failed with exception: $exception"
+        stack ::= exception.trace
+        value ::= exception.value
+        send-trace-message stack
         // Turning the cellular modem on failed, so we artificially
         // bump the number of attempts to get close to a reset.
         if attempts_until_reset > 1:
-          update_attempts_ attempts + attempts_until_reset - 1
+          print "CellularServiceProvider.open_driver failed, bumping attempts to $attempts"
+          // update_attempts_ attempts + attempts_until_reset - 1
         // Close the UART before closing the pins. This is typically
         // taken care of by a call to driver.close, but in this case
         // we failed to produce a working driver instance.
@@ -523,10 +553,18 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
 
   set-and-cache-apn apn/string:
     bucket_[CONFIG_APN_KEY] = apn
-    config_[CONFIG_APN_KEY] = apn
+    if apn is string and apn.size > 0:
+      config_[CONFIG_APN_KEY] = apn
+
+  set-and-cache-operator operator/string:
+    bucket_[CONFIG_OPERATOR_KEY] = operator
+    if operator is string and operator.size > 0:
+      config_[CONFIG_OPERATOR_KEY] = operator
 
   set-and-cache-pin-code pin-code/string:
     bucket_[CONFIG_PIN_CODE_KEY] = pin_code
+    if pin_code is string and pin_code.size > 0:
+      config_[CONFIG_PIN_CODE_KEY] = pin_code
 
 
 class CellularStateServiceHandler_ implements ServiceHandler CellularStateService:
@@ -564,11 +602,18 @@ class CellularConfigServiceHandler_ implements ServiceHandler CellularConfigServ
 
   handle index/int arguments/any --gid/int --client/int -> any:
     if index == CellularConfigService.APN_INDEX: return set-apn arguments
+    if index == CellularConfigService.OPERATOR_INDEX: return set-operator arguments
     if index == CellularConfigService.PIN_INDEX: return set-pin-code arguments
     unreachable
 
   set-apn apn/string:
+    print "set-apn called with apn=$apn"
     catch: return provider.set-and-cache-apn apn
+    return null
+
+  set-operator operator/string:
+    print "set-operator called with operator=$operator"
+    catch: return provider.set-and-cache-operator operator
     return null
 
   set-pin-code pin/string:

@@ -128,7 +128,11 @@ class TcpSocket extends Socket_ implements tcp.Socket:
     cellular_.at_.do: | session/at.Session |
       try:
         session.set "+USOWR" [get_id_, data.size] --data=data
-      finally: | is_exception _ |
+      finally: | is_exception e |
+        //TODO: Handle this better to recover in current state wihout starting completely over.
+        // May poll last socket error with: +USOCTL=1 or listen for +UUSOCL URC code
+        print "EXCEPTION: $is_exception - $e"
+        
         // If we get an exception while writing, we risk leaving the
         // modem in an awful state. Close the session to force us to
         // start over.

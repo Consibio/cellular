@@ -33,6 +33,7 @@ class SaraR5Service extends CellularServiceProvider:
       --power/gpio.Pin?
       --reset/gpio.Pin?
       --baud_rates/List?:
+    print "SaraR5Service.create_driver id=$(random 1000)"
     return SaraR5 port logger
         --rx=rx
         --tx=tx

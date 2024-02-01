@@ -2,3 +2,7 @@ name: cellular
 description: Cellular drivers for a selection of modems.
 environment:
   sdk: ^2.0.0-alpha.108
+dependencies:
+  http:
+    url: github.com/toitlang/pkg-http
+    version: ^2.3.4

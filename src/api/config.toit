@@ -14,8 +14,11 @@ interface CellularConfigService:
   set-apn apn/string
   static APN_INDEX ::= 0
 
+  set-operator operator/string
+  static OPERATOR_INDEX ::= 1
+
   set-pin-code pin/string
-  static PIN_INDEX ::= 1
+  static PIN_INDEX ::= 2
 
 class CellularConfigServiceClient extends services.ServiceClient implements CellularConfigService:
   static SELECTOR ::= CellularConfigService.SELECTOR
@@ -24,7 +27,10 @@ class CellularConfigServiceClient extends services.ServiceClient implements Cell
     super selector
 
   set-apn apn/string:
-    return invoke_ CellularConfigService.APN_INDEX null
+    return invoke_ CellularConfigService.APN_INDEX apn
+
+  set-operator operator/string:
+    return invoke_ CellularConfigService.OPERATOR_INDEX operator
 
   set-pin-code pin/string:
-    return invoke_ CellularConfigService.PIN_INDEX null
+    return invoke_ CellularConfigService.PIN_INDEX pin

@@ -12,6 +12,11 @@ set-apn apn/string:
   if not service: throw "cellular unavailable"
   return service.set-apn apn
 
+set-operator operator/string:
+  service := service_
+  if not service: throw "cellular unavailable"
+  return service.set-operator operator
+
 set-pin-code pin/string:
   service := service_
   if not service: throw "cellular unavailable"
