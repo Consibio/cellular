@@ -178,7 +178,7 @@ abstract class CellularBase implements Cellular:
     return false
 
   is_ready_ session/at.Session:
-    response := session.action "" --timeout=(Duration --ms=250) --no-check
+    response := session.action "" --timeout=(Duration --s=2) --no-check
 
     if response == null:
       // By sleeping for even a little while here, we get a check for whether or
@@ -192,9 +192,9 @@ abstract class CellularBase implements Cellular:
     sleep --ms=100
 
     // Disable echo.
-    session.action "E0"
+    session.action "E0" --timeout=(Duration --s=5)
     // Verbose errors.
-    session.set "+CMEE" [2]
+    session.set "+CMEE" [2] --timeout=(Duration --s=5)
     // TODO(anders): This is where we want to use an optional PIN:
     //   session.set "+CPIN" ["1234"]
 

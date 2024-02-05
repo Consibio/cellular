@@ -84,7 +84,7 @@ class SaraR5 extends UBloxCellular:
     return true
 
   on_connected_ session/at.Session:
-    upsd_status := session.set "+UPSND" [0, 8]
+    upsd_status := session.set "+UPSND" [0, 8] --timeout=(Duration --s=5)
     if list_equals_ upsd_status.last [0, 8, 1]:
       // The PDP profile is already active. Trying to change it is
       // an illegal operation at this point.
@@ -95,8 +95,8 @@ class SaraR5 extends UBloxCellular:
     // but we have seen that the this can be unreliable for some
     // networks (e.g. Telenor DK and TDC DK)
     if not registered_on_network_: throw "not registered on network"
-    session.set "+UPSD" [0, 4, "8.8.8.8"] --timeout=(Duration --s=150)
-    session.set "+UPSD" [0, 5, "8.8.4.4"] --timeout=(Duration --s=150)
+    session.set "+UPSD" [0, 4, "8.8.8.8"] --timeout=(Duration --s=5)
+    session.set "+UPSD" [0, 5, "8.8.4.4"] --timeout=(Duration --s=5)
 
     // Activate PDP context 1.
     if not registered_on_network_: throw "not registered on network"
@@ -120,11 +120,11 @@ class SaraR5 extends UBloxCellular:
     //    2: IPv4v6 with IPv4 preferred for internal sockets
     //    3: IPv4v6 with IPv6 preferred for internal sockets
     if not registered_on_network_: throw "not registered on network"
-    session.set "+UPSD" [0, 0, 0]
+    session.set "+UPSD" [0, 0, 0] --timeout=(Duration --s=5)
 
     // Map PSD profile id 0 to PDP context ID (cid) 1
     if not registered_on_network_: throw "not registered on network"
-    session.set "+UPSD" [0, 100, 1]
+    session.set "+UPSD" [0, 100, 1] --timeout=(Duration --s=5)
 
     // Activate the PSD profile #0.
     // This should be called each time. If not called
@@ -144,13 +144,19 @@ class SaraR5 extends UBloxCellular:
 
   power_on -> none:
     if not pwr_on: return
+    // The datasheet states that RESET_N must be pulled low for
+    // min. 1sec and max. 2sec to initiate a power on sequence.
+    // We do this by setting PWR_ON high (the line is inverted
+    // on most boards), then waiting for 1.5s
     critical_do --no-respect_deadline:
       pwr_on.set 1
-      sleep --ms=1000
+      sleep --ms=1500
       pwr_on.set 0
-      // TODO(kasper): We try to wait for a bit like we do on
-      // the SaraR4. It isn't clear if this is necessary.
-      sleep --ms=250
+      // The module is ready approx. 2sec after the power on
+      // sequence is initiated. We wait a little while here 
+      // to force the consumer of this method to wait 
+      // appropriately.
+      sleep --ms=500
 
   power_off -> none:
     if not (pwr_on and reset_n): return
