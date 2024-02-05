@@ -223,10 +223,12 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
         with_timeout --ms=20_000: driver.wait_for_ready
 
       // Get iccid, model and version and cache them
-      /* catch: with-timeout --ms=5_000:
+      catch: with-timeout --ms=5_000:
         update_cached_iccid driver.iccid
+      catch: with-timeout --ms=5_000:
         update_cached_model driver.model
-        update_cached_version driver.version */
+      catch: with-timeout --ms=5_000:
+        update_cached_version driver.version
 
       // The CFUN command (called in both driver.configure where
       // the modem is disable with CFUN=0 and then enabled again
