@@ -161,11 +161,19 @@ abstract class CellularBase implements Cellular:
     disable_radio_ session
     wait_for_sim_ session
 
+  // Select an appropriate baud rate for communication with 
+  // the modem. We try all the baud rates in uart_baud_rates
+  // iteratively, and if we find one that works, we set it.
+  // We prioritize the preferred baud rate.
   select_baud_ session/at.Session --count=5:
     preferred := uart_baud_rates.first
-    count.repeat:
-      uart_baud_rates.do: | rate |
-        uart_.baud_rate = rate
+    uart_baud_rates.do: | rate |
+      uart_.baud_rate = rate
+      // Test the baud rate multiple times to ensure that 
+      // it works instead of trying it once and then change.
+      // Otherwise, we might confuse the auto-baud detection
+      // algorithm present on some modems.
+      count.repeat:
         if is_ready_ session:
           // If the current rate isn't the preferred one, we assume
           // we can change it to the preferred one. If it already is
@@ -175,6 +183,7 @@ abstract class CellularBase implements Cellular:
           if rate != preferred:
             set_baud_rate_ session preferred
           return true
+        sleep --ms=250
     return false
 
   is_ready_ session/at.Session:
