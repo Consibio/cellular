@@ -128,11 +128,16 @@ class TcpSocket extends Socket_ implements tcp.Socket:
     cellular_.at_.do: | session/at.Session |
       try:
         session.set "+USOWR" [get_id_, data.size] --data=data
-      finally: | is_exception _ |
+      finally: | is_exception e |
+        //TODO: Handle this better to recover in current state wihout starting completely over.
+        // May poll last socket error with: +USOCTL=1 or listen for +UUSOCL URC code
+        
         // If we get an exception while writing, we risk leaving the
         // modem in an awful state. Close the session to force us to
         // start over.
         if is_exception:
+          print "USOWR EXCEPTION: $e"
+          sleep --ms=5000 // TODO: Sleep some time to see if the URC code comes. Remove this test at some point
           if provider_:
             provider_.disconnect
           else:
@@ -402,10 +407,10 @@ abstract class UBloxCellular extends CellularBase:
         // If the chip was recently rebooted, wait for it to be responsive before
         // communicating with it again.
         attempts := 0
-        while not select_baud_ session:
-          if ++attempts > 5: return
-        // Send the power-off command.
-        session.send CPWROFF
+        catch --trace: with-timeout --ms=20_000:
+          while true:
+            session.send CPWROFF
+            return
     finally:
       at_session_.close
       uart_.close
@@ -634,7 +639,9 @@ abstract class UBloxCellular extends CellularBase:
     // Set the baud rate to the requested one.
     session.set "+IPR" [baud_rate]
     uart_.baud_rate = baud_rate
-    sleep --ms=100
+
+    // Wait for at least 100ms before issuing a new command.
+    sleep --ms=150
 
   open_network --provider/ProxyingNetworkServiceProvider?=null -> net.Interface:
     return Interface_ network_name this provider

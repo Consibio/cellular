@@ -11,7 +11,7 @@ interface CellularStateService:
       --major=0
       --minor=1
 
-  quality cache/bool -> SignalQuality?
+  quality -> SignalQuality?
   static QUALITY_INDEX ::= 0
 
   iccid -> string?
@@ -29,8 +29,8 @@ class CellularStateServiceClient extends services.ServiceClient implements Cellu
     assert: selector.matches SELECTOR
     super selector
 
-  quality cache/bool -> SignalQuality?:
-    result := invoke_ CellularStateService.QUALITY_INDEX cache
+  quality -> SignalQuality?:
+    result := invoke_ CellularStateService.QUALITY_INDEX null
     return result ? (SignalQuality --power=result[0] --quality=result[1]) : null
 
   iccid -> string?:

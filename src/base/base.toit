@@ -40,7 +40,8 @@ abstract class CellularBase implements Cellular:
 
   is_lte_connection_ := false
 
-  registered_on_network_ := false
+  registered_on_network_/bool := false
+  pdp_context_activated_/bool := false
 
   constructor
       .uart_
@@ -154,18 +155,26 @@ abstract class CellularBase implements Cellular:
       // We try to power on the modem a number of
       // times (until we run out of time) to improve
       // the robustness of the power on sequence.
-      power_on
       if select_baud_ session: break
 
   enter_configuration_mode_ session/at.Session:
     disable_radio_ session
     wait_for_sim_ session
 
+  // Select an appropriate baud rate for communication with 
+  // the modem. We try all the baud rates in uart_baud_rates
+  // iteratively, and if we find one that works, we set it.
+  // We prioritize the preferred baud rate.
   select_baud_ session/at.Session --count=5:
     preferred := uart_baud_rates.first
-    count.repeat:
-      uart_baud_rates.do: | rate |
-        uart_.baud_rate = rate
+    uart_baud_rates.do: | rate |
+      uart_.baud_rate = rate
+      // Test the baud rate multiple times to ensure that 
+      // it works instead of trying it once and then change.
+      // Otherwise, we might confuse the auto-baud detection
+      // algorithm present on some modems.
+      count.repeat:
+        power_on
         if is_ready_ session:
           // If the current rate isn't the preferred one, we assume
           // we can change it to the preferred one. If it already is
@@ -174,13 +183,22 @@ abstract class CellularBase implements Cellular:
           // that we correctly configured the rate.
           if rate != preferred:
             set_baud_rate_ session preferred
-          return true
+          else:
+            return true
+        sleep --ms=250
     return false
 
   is_ready_ session/at.Session:
-    response := session.action "" --timeout=(Duration --ms=250) --no-check
+    attempt := 0
+    two_successful_attempts := false
+    success_count := 0
+    while attempt++ <= 4 and not two_successful_attempts:
+      response := session.action "" --timeout=(Duration --s=2) --no-check
+      if response != null:
+        success_count++
+      two_successful_attempts = (success_count >= 2)
 
-    if response == null:
+    if not two_successful_attempts:
       // By sleeping for even a little while here, we get a check for whether or
       // not we're past any deadline set by the caller of this method. The sleep
       // inside the is_ready call isn't enough, because it is wrapped in a catch
@@ -192,13 +210,17 @@ abstract class CellularBase implements Cellular:
     sleep --ms=100
 
     // Disable echo.
-    session.action "E0"
+    session.action "E0" --timeout=(Duration --s=5)
     // Verbose errors.
-    session.set "+CMEE" [2]
+    session.set "+CMEE" [2] --timeout=(Duration --s=5)
     // TODO(anders): This is where we want to use an optional PIN:
     //   session.set "+CPIN" ["1234"]
 
     return true
+
+  wait_for_sim:
+    at_.do: | session/at.Session |
+      wait_for_sim_ session
 
   wait_for_sim_ session/at.Session:
     // Wait up to 10 seconds for the SIM to be initialized.
@@ -225,7 +247,7 @@ abstract class CellularBase implements Cellular:
       err := catch:
         failed_to_connect = true
         is_lte_connection_ = false
-        network_registered := false
+        context_activated_/bool := false
 
         done := monitor.Latch
         registrations := { "+CEREG" }
@@ -297,16 +319,40 @@ abstract class CellularBase implements Cellular:
               if command:
                 send_abortable_ session command
 
-          // Wait for network registration.
-          logger.debug "waiting for urc..."
-          wait_for_urc_ --session=session:
-            if done.get == "+CGREG":
-              is_lte_connection_ = true
-              use_psm = false
+          // Wait for network registration, but only if we are not
+          // already registered. We have seen situations where 
+          // registration succeeds before this point, so we need
+          // to check if we are already registered.
+          if not registered_on_network_:
+            logger.debug "waiting for network registration"
+            wait_for_urc_ --session=session:
+              if done.get == "+CGREG":
+                is_lte_connection_ = true
+                use_psm = false
+          
+          // Set up the URC handler for the PDP context activation.
+          activation_latch := monitor.Latch
+          command := "+UUPSDA"
+          registrations.add command
+          session.register_urc command::
+            result := it.first
+            //ip := it[1]
+            if result == 0:
+              pdp_context_activated_ = true
+              activation_latch.set command
+            else:
+              pdp_context_activated_ = false
+              activation_latch.set --exception "PDP context activation failed"
 
           // Activate the PDP context.
           on_connected_ session
           failed_to_connect = false
+
+          // Wait for the PDP context activation URC
+          logger.debug "waiting for PDP context activation"
+          wait_for_urc_ --session=session:
+            if activation_latch.get == "+UUPSDA":
+              logger.debug "PDP context activation successful"
 
           // We test the IP stack here before releasing it
           // to ensure that it's working. If it's not, the
