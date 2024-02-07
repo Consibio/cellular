@@ -179,9 +179,7 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
         value := bucket_.get key
         // Only override valid values:
         if value is string and value.size > 0:
-          print "OVERRIDABLE_CONFIG_KEYS key=$key, value=$value"
           config_[key] = value
-    print "config_=$config_"
 
     return connect client
 
@@ -609,12 +607,10 @@ class CellularConfigServiceHandler_ implements ServiceHandler CellularConfigServ
     unreachable
 
   set-apn apn/string:
-    print "set-apn called with apn=$apn"
     catch: return provider.set-and-cache-apn apn
     return null
 
   set-operator operator/string:
-    print "set-operator called with operator=$operator"
     catch: return provider.set-and-cache-operator operator
     return null
 

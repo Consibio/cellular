@@ -131,7 +131,6 @@ class TcpSocket extends Socket_ implements tcp.Socket:
       finally: | is_exception e |
         //TODO: Handle this better to recover in current state wihout starting completely over.
         // May poll last socket error with: +USOCTL=1 or listen for +UUSOCL URC code
-        print "EXCEPTION: $is_exception - $e"
         
         // If we get an exception while writing, we risk leaving the
         // modem in an awful state. Close the session to force us to
