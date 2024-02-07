@@ -638,7 +638,9 @@ abstract class UBloxCellular extends CellularBase:
     // Set the baud rate to the requested one.
     session.set "+IPR" [baud_rate]
     uart_.baud_rate = baud_rate
-    sleep --ms=100
+
+    // Wait for at least 100ms before issuing a new command.
+    sleep --ms=150
 
   open_network --provider/ProxyingNetworkServiceProvider?=null -> net.Interface:
     return Interface_ network_name this provider
