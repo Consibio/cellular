@@ -33,7 +33,6 @@ class SaraR5Service extends CellularServiceProvider:
       --power/gpio.Pin?
       --reset/gpio.Pin?
       --baud_rates/List?:
-    print "SaraR5Service.create_driver id=$(random 1000)"
     return SaraR5 port logger
         --rx=rx
         --tx=tx
@@ -149,7 +148,7 @@ class SaraR5 extends UBloxCellular:
     // We do this by setting PWR_ON high (the line is inverted
     // on most boards), then waiting for 1.5s
     critical_do --no-respect_deadline:
-      logger.debug "Performing power_on sequence for Sara-R5"
+      logger.debug "performing power_on sequence for Sara-R5"
       pwr_on.set 1
       sleep --ms=1500
       pwr_on.set 0
