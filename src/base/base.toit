@@ -209,6 +209,10 @@ abstract class CellularBase implements Cellular:
 
     return true
 
+  wait_for_sim:
+    at_.do: | session/at.Session |
+      wait_for_sim_ session
+
   wait_for_sim_ session/at.Session:
     // Wait up to 10 seconds for the SIM to be initialized.
     40.repeat:

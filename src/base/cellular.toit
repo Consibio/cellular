@@ -71,6 +71,8 @@ interface Cellular:
 
   wait_for_ready -> none
 
+  wait_for_sim -> none
+
   enable_radio -> none
 
   disable_radio -> none
