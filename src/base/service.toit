@@ -218,7 +218,7 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
       if attempts_ > 0 and attempts_ % CELLULAR_FAILS_UNTIL_FACTORY_RESET == 0:
         logger.info "performing factory reset"
         driver.factory_reset
-        with_timeout --ms=20_000: driver.wait_for_ready
+        with_timeout --ms=40_000: driver.wait_for_ready
 
       // Get iccid, model and version and cache them
       catch: with-timeout --ms=5_000:
