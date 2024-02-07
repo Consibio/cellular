@@ -40,7 +40,8 @@ abstract class CellularBase implements Cellular:
 
   is_lte_connection_ := false
 
-  registered_on_network_ := false
+  registered_on_network_/bool := false
+  pdp_context_activated_/bool := false
 
   constructor
       .uart_
@@ -246,7 +247,7 @@ abstract class CellularBase implements Cellular:
       err := catch:
         failed_to_connect = true
         is_lte_connection_ = false
-        network_registered := false
+        context_activated_/bool := false
 
         done := monitor.Latch
         registrations := { "+CEREG" }
@@ -318,16 +319,40 @@ abstract class CellularBase implements Cellular:
               if command:
                 send_abortable_ session command
 
-          // Wait for network registration.
-          logger.debug "waiting for urc..."
-          wait_for_urc_ --session=session:
-            if done.get == "+CGREG":
-              is_lte_connection_ = true
-              use_psm = false
+          // Wait for network registration, but only if we are not
+          // already registered. We have seen situations where 
+          // registration succeeds before this point, so we need
+          // to check if we are already registered.
+          if not registered_on_network_:
+            logger.debug "waiting for network registration"
+            wait_for_urc_ --session=session:
+              if done.get == "+CGREG":
+                is_lte_connection_ = true
+                use_psm = false
+          
+          // Set up the URC handler for the PDP context activation.
+          activation_latch := monitor.Latch
+          command := "+UUPSDA"
+          registrations.add command
+          session.register_urc command::
+            result := it.first
+            //ip := it[1]
+            if result == 0:
+              pdp_context_activated_ = true
+              activation_latch.set command
+            else:
+              pdp_context_activated_ = false
+              activation_latch.set --exception "PDP context activation failed"
 
           // Activate the PDP context.
           on_connected_ session
           failed_to_connect = false
+
+          // Wait for the PDP context activation URC
+          logger.debug "waiting for PDP context activation"
+          wait_for_urc_ --session=session:
+            if activation_latch.get == "+UUPSDA":
+              logger.debug "PDP context activation successful"
 
           // We test the IP stack here before releasing it
           // to ensure that it's working. If it's not, the
