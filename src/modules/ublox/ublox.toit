@@ -136,6 +136,8 @@ class TcpSocket extends Socket_ implements tcp.Socket:
         // modem in an awful state. Close the session to force us to
         // start over.
         if is_exception:
+          print "USOWR EXCEPTION: $e"
+          sleep --ms=5000 // TODO: Sleep some time to see if the URC code comes. Remove this test at some point
           if provider_:
             provider_.disconnect
           else:

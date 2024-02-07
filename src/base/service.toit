@@ -106,7 +106,6 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
   scores_/OperatorScores := ?
 
   constructor name/string --major/int --minor/int --patch/int=0:
-    print "CellularServiceProvider constructor called! id=$(random 1000)"
     attempts/int? := null
     scores/Map? := null
 
@@ -208,8 +207,6 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
     configured_operator := config_.get CONFIG_OPERATOR_KEY --if-absent=:""
     pin_code := config_.get CONFIG_PIN_CODE_KEY --if_absent=:""
 
-    print "apn=$apn bands=$bands rats=$rats configured_operator=$configured_operator pin_code=$pin_code"
-
     try:
       // Perform factory reset, if we have tried to connect without
       // success more than 31 times (we offset it by 1 to ensure that
@@ -293,12 +290,11 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
             if scores_.score_for_last_operator < OPERATOR_SCORE_THRESHOLD or should_scan:
               operator_ = scores_.get_best_operator
               if operator_:
-                print "Using operator $operator_.op with score $(%.2f scores_.score_for_last_operator)%"
+                logger.debug "using operator $operator_.op with score $(%.2f scores_.score_for_last_operator)%"
 
       // Connects can take up to 3 minutes on u-blox SARA
       with_timeout --ms=180_000:
         logger.info "connecting"
-        print "[CellularDebug] Connecting with operator_=$operator_ and apn=$apn"
         driver.connect --operator=operator_
           
       update_attempts_ 0  // Success. Reset the attempts.
