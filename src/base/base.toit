@@ -154,7 +154,6 @@ abstract class CellularBase implements Cellular:
       // We try to power on the modem a number of
       // times (until we run out of time) to improve
       // the robustness of the power on sequence.
-      power_on
       if select_baud_ session: break
 
   enter_configuration_mode_ session/at.Session:
@@ -174,6 +173,7 @@ abstract class CellularBase implements Cellular:
       // Otherwise, we might confuse the auto-baud detection
       // algorithm present on some modems.
       count.repeat:
+        power_on
         if is_ready_ session:
           // If the current rate isn't the preferred one, we assume
           // we can change it to the preferred one. If it already is
@@ -182,14 +182,22 @@ abstract class CellularBase implements Cellular:
           // that we correctly configured the rate.
           if rate != preferred:
             set_baud_rate_ session preferred
-          return true
+          else:
+            return true
         sleep --ms=250
     return false
 
   is_ready_ session/at.Session:
-    response := session.action "" --timeout=(Duration --s=2) --no-check
+    attempt := 0
+    two_successful_attempts := false
+    success_count := 0
+    while attempt++ <= 4 and not two_successful_attempts:
+      response := session.action "" --timeout=(Duration --s=2) --no-check
+      if response != null:
+        success_count++
+      two_successful_attempts = (success_count >= 2)
 
-    if response == null:
+    if not two_successful_attempts:
       // By sleeping for even a little while here, we get a check for whether or
       // not we're past any deadline set by the caller of this method. The sleep
       // inside the is_ready call isn't enough, because it is wrapped in a catch
