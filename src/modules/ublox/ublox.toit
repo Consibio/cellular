@@ -406,10 +406,10 @@ abstract class UBloxCellular extends CellularBase:
         // If the chip was recently rebooted, wait for it to be responsive before
         // communicating with it again.
         attempts := 0
-        while not select_baud_ session:
-          if ++attempts > 5: return
-        // Send the power-off command.
-        session.send CPWROFF
+        catch --trace: with-timeout --ms=20_000:
+          while true:
+            session.send CPWROFF
+            return
     finally:
       at_session_.close
       uart_.close
