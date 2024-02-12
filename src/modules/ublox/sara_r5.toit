@@ -200,6 +200,23 @@ class SaraR5 extends UBloxCellular:
     rx.configure --input
     return all_low
 
+  get_connected_operator -> cellular.Operator?:
+    catch --trace:
+      at_.do: | session/at.Session |
+        // Extract MCC and MNC from the UCGED response.
+        // This command is independent of COPS operator format settings
+        // so we use this one on SARA-R5
+        description := (session.read "+UCGED").responses
+        if description.size >= 2:
+          network_desc := description[1]
+          if network_desc.size >= 3:
+            mcc := network_desc[2]
+            mnc := network_desc[3]
+            if mcc and mnc:
+              return cellular.Operator "$(mcc)$(mnc)"
+
+    return null
+
 
 class UPSDA extends at.Command:
   // UPSDA times out after 180s, but since it can be aborted, any timeout can be used.
