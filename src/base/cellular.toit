@@ -45,7 +45,7 @@ interface Cellular:
   /**
   Connect to the service using the optional operator.
   */
-  connect --operator/Operator?=null -> none
+  connect --operator/Operator?=null --force-auto-cops/bool=false -> none
 
   /**
   Connect to the service after a PSM wakeup.

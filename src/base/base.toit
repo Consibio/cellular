@@ -90,9 +90,9 @@ abstract class CellularBase implements Cellular:
     at_.do: | session/at.Session |
       connect_ session --operator=null --psm
 
-  connect --operator/Operator?=null -> none:
+  connect --operator/Operator?=null --force-auto-cops/bool=false -> none:
     at_.do: | session/at.Session |
-      connect_ session --operator=operator --no-psm
+      connect_ session --operator=operator --no-psm --force-auto-cops=force-auto-cops
 
   // TODO(Lau): Support the other operator formats than numeric.
   get_connected_operator -> Operator?:
@@ -239,7 +239,7 @@ abstract class CellularBase implements Cellular:
       if session: session.action "" --no-check
       else: at_.do: it.action "" --no-check
 
-  connect_ session/at.Session --operator/Operator? --psm/bool --reattach/bool=false -> none:
+  connect_ session/at.Session --operator/Operator? --psm/bool --reattach/bool=false --force-auto-cops/bool=false -> none:
     connection_attempt := 0
     while connection_attempt < 8:
       if reattach:
@@ -249,7 +249,7 @@ abstract class CellularBase implements Cellular:
         is_lte_connection_ = false
         context_activated_/bool := false
 
-        done := monitor.Latch
+        registration_latch := monitor.Latch
         registrations := { "+CEREG" }
         if support_gsm_: registrations.add "+CGREG"
         failed := {}
@@ -267,7 +267,7 @@ abstract class CellularBase implements Cellular:
               // 5 = registered, roaming
               if state == 1 or state == 5:
                 failed.remove command
-                done.set command
+                registration_latch.set command
                 registered_on_network_ = true
 
               // If we get a 3, registration has been denied.
@@ -275,7 +275,7 @@ abstract class CellularBase implements Cellular:
                 failed.add command
                 error := state == 3 ? REGISTRATION_DENIED_ERROR : "connection lost"
                 // If all registrations have failed, we report the last error.
-                if failed.size == registrations.size: done.set --exception error
+                if failed.size == registrations.size: registration_latch.set --exception error
                 registered_on_network_ = false
 
               // If we get a 0 we're not registered, so we should try again.
@@ -308,14 +308,17 @@ abstract class CellularBase implements Cellular:
               cur_cops := result.single
               cur_mode := cur_cops[0]
 
-              // If operator is defined, do manual operator selection.
-              // Otherwise, only set new COPS value if it's not currently
-              // set to automatic mode. Calling COPS=0 every time takes 
-              // much longer.
-              if operator:
-                command = COPS.manual operator.op --rat=operator.rat
-              else if cur_mode != COPS.MODE_AUTOMATIC:
+              // Only change to automatic mode if its enforced. 
+              // If not, do manual operator selection, but only if the
+              // operator is defined. In all other cases, we rely on
+              // the last COPS setting of the modem (which might be
+              // automatic or a manually chosen operator. In both cases,
+              // they will be retained in the modem's non-volatile memory).
+              // Calling COPS=0 or COPS=1,<oper> every time takes much longer.
+              if force-auto-cops and cur_mode != COPS.MODE_AUTOMATIC:
                 command = COPS.automatic
+              else if operator:
+                command = COPS.manual operator.op --rat=operator.rat
               if command:
                 send_abortable_ session command
 
@@ -326,7 +329,7 @@ abstract class CellularBase implements Cellular:
           if not registered_on_network_:
             logger.debug "waiting for network registration"
             wait_for_urc_ --session=session:
-              if done.get == "+CGREG":
+              if registration_latch.get == "+CGREG":
                 is_lte_connection_ = true
                 use_psm = false
           
@@ -336,7 +339,6 @@ abstract class CellularBase implements Cellular:
           registrations.add command
           session.register_urc command::
             result := it.first
-            //ip := it[1]
             if result == 0:
               pdp_context_activated_ = true
               activation_latch.set command
@@ -366,7 +368,6 @@ abstract class CellularBase implements Cellular:
               sleep --ms=500
 
         finally:
-          // TODO(kasper): Should we unregister the interest in the events?
           registrations.do: session.unregister_urc it
 
         return

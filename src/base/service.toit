@@ -28,6 +28,7 @@ import ..state
 import ..config
 
 CELLULAR_FAILS_BETWEEN_RESETS /int ::= 8
+CELLULAR_FAILS_UNTIL_RESELECT /int ::= 4
 CELLULAR_FAILS_UNTIL_SCAN  /int ::= 4
 CELLULAR_FAILS_UNTIL_SCORE_RESET /int ::= 32
 CELLULAR_FAILS_UNTIL_FACTORY_RESET /int ::= CELLULAR_FAILS_UNTIL_SCORE_RESET - 1
@@ -244,14 +245,13 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
       with_timeout --ms=180_000:
         catch --trace:
           configured_operator_is_valid := configured_operator is string and configured_operator.size > 4
-          print "configured_operator_is_valid=$configured_operator_is_valid attempts_=$attempts_"
 
           // If we have tried to connect without succes more than
           // 32 times, reset the scores to ensure that we are not
           // stuck, if some scoring logic is broken. Only reset it
           // if we are not using a configured operator, as we don't
           // use the scores in that case.
-          if (not configured_operator_is_valid and attempts_ > 1 and attempts_ % CELLULAR_FAILS_UNTIL_SCORE_RESET == 0): 
+          if (not configured_operator_is_valid and attempts_ > 0 and attempts_ % CELLULAR_FAILS_UNTIL_SCORE_RESET == 0): 
             scores_.reset_all
 
           // If there is an operator forced by the configuration,
@@ -259,20 +259,20 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
           if configured_operator_is_valid:
             operator_ = Operator configured_operator
 
-          // Every other attempt, we rely on the modem's automatic
-          // operator selection. This is to ensure that we try out
-          // new operators properly before manually selecting a 
-          // new one.
+          // Every other attempt, we rely on the modem's current 
+          // settings for oeprator selection. This is to ensure
+          // that we try out new operators properly before manually
+          // selecting a new one.
           else if (attempts_ > 0 and attempts_ % 2 == 0):
 
-            // If there is no operator forced by the configuration,
+            // If there is no operator enforced by the configuration,
             // we rely on the scoring mechanisms to select the best
             // operator.
 
             // If we have tried to connect without succes more than
             // the number of times defined by CELLULAR_FAILS_UNTIL_SCAN,
-            // scan for operators on every 4th attempt.
-            should_scan := (attempts_ > CELLULAR_FAILS_UNTIL_SCAN) and (attempts_ % 4 == 0)
+            // scan for operators on every multiple of this value.
+            should_scan := (attempts_ > 0) and (attempts_ % CELLULAR_FAILS_UNTIL_SCAN == 0)
             if (should_scan):
               logger.info "scanning for operators" --tags={"attempt": attempts_}
               scores_.set_available_operators driver.scan_for_operators
@@ -282,12 +282,17 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
             // new one, if there exists one with a higher score than 
             // the last. Also do this if we have just scanned for 
             // operators to ensure that we try out newly discovered
-            // operators. 
+            // operators. Furthermore, do this if we have tried to
+            // connect without success enough times.
             // If no known scores are known, score_for_last_operator 
             // will return 0, but get_best_operator will return null,
-            // so it will attempt auto-COPS until a scan has been
-            // performed at least one time.
-            if scores_.score_for_last_operator < OPERATOR_SCORE_THRESHOLD or should_scan:
+            // so it will attempt automatic operator selection (COPS=0
+            // which is the default setting of the modem) until a scan
+            // has been performed at least one time or an operator
+            // was previously automatically selected with succes.
+            if scores_.score_for_last_operator < OPERATOR_SCORE_THRESHOLD 
+                or should_scan 
+                or attempts_ >= CELLULAR_FAILS_UNTIL_RESELECT:
               operator_ = scores_.get_best_operator
               if operator_:
                 logger.debug "using operator $operator_.op with score $(%.2f scores_.score_for_last_operator)%"
@@ -295,6 +300,7 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
       // Connects can take up to 3 minutes on u-blox SARA
       with_timeout --ms=180_000:
         logger.info "connecting"
+        // TODO: Set COPS=0 if successive_attempts_ > 4?
         driver.connect --operator=operator_
           
       update_attempts_ 0  // Success. Reset the attempts.
@@ -309,6 +315,7 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
         catch:
           with_timeout --ms=5_000:
             operator_ = driver.get_connected_operator
+            logger.debug "connected to operator: $operator_"
 
       connected_at_ = esp32.total_run_time
       // Once the network is established, we change the state of the
@@ -406,15 +413,10 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
       return driver
     finally: | is_exception exception |
       if is_exception:
-        print "CellularServiceProvider.open_driver failed with exception: $exception"
         stack ::= exception.trace
         value ::= exception.value
         send-trace-message stack
-        // Turning the cellular modem on failed, so we artificially
-        // bump the number of attempts to get close to a reset.
-        if attempts_until_reset > 1:
-          print "CellularServiceProvider.open_driver failed, bumping attempts to $attempts"
-          // update_attempts_ attempts + attempts_until_reset - 1
+
         // Close the UART before closing the pins. This is typically
         // taken care of by a call to driver.close, but in this case
         // we failed to produce a working driver instance.
@@ -429,43 +431,32 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
       catch --trace: with-timeout --ms=10_000:
         disconnected_at_ = esp32.total_run_time
         log.log log_level "closing" --tags=log_tags
-        
-        // Calculate time_to_error as the number of seconds from the
-        // connected_at_ time to the disconnected_at_ time (which are
-        // both in microseconds, so we converted to secs and round).
-        // If the modem was never connected, we set time_to_error to
-        // 0 seconds.
-        time_to_error := (connected_at_ is int) ?  ((disconnected_at_ - connected_at_)*0.000001).round : 0
-
-        // Calculate the tte_score (time-to-error score). If the
-        // driver was closed with an error, we use the time_to_error
-        // as the tte_score. Otherwise, we use the ACCEPTABLE_TIME_TO_ERROR
-        // as the tte_score. This is to ensure that we don't penalize
-        // the operator for a connection that was closed cleanly.
-        tte_score := (error) ? time_to_error : ACCEPTABLE_TIME_TO_ERROR
-
-        // Get the currently active operator in order to score it properly.
-        // If operator_ was defined during connection, use that. Otherwise,
-        // we try to query the modem for the currently connected operator.
-        // If that fails, we assume that the operator is the same as the last
-        // (which is almost always the case) and pull it from the last session
-        // in the scores_.
-        operator := operator_
-        /* if not operator:
-          catch:
-            with-timeout --ms=5_000: 
-              operator = driver.get_connected_operator */
-        if not operator:
-          operator = scores_.get_last_operator
 
         // If we have an operator, we score it.
-        if operator:
-          scores_.add --tte=tte_score --time=Time.now --operator=operator
+        if operator_:
+          
+          // Calculate time_to_error as the number of seconds from the
+          // connected_at_ time to the disconnected_at_ time (which are
+          // both in microseconds, so we converted to secs and round).
+          // If the modem was never connected, we set time_to_error to
+          // 0 seconds.
+          time_to_error := (connected_at_ is int) ?  ((disconnected_at_ - connected_at_)*0.000001).round : 0
+
+          // Calculate the tte_score (time-to-error score). If the
+          // driver was closed with an error, we use the time_to_error
+          // as the tte_score. Otherwise, we use the ACCEPTABLE_TIME_TO_ERROR
+          // as the tte_score. This is to ensure that we don't penalize
+          // the operator for a connection that was closed cleanly.
+          tte_score := (error) ? time_to_error : ACCEPTABLE_TIME_TO_ERROR
+        
+          // Save the score
+          scores_.add --tte=tte_score --time=Time.now --operator=operator_
           update_scores_
-          logger.info "Saved new operator score to flash for $operator.op. Scores are now: $scores_.stringify_scores"
+          logger.info "Saved new operator score to flash for $operator_.op. Scores are now: $scores_.stringify_scores"
 
       // Close the driver
-      catch: with_timeout --ms=20_000: driver.close
+      catch: with_timeout --ms=20_000: 
+        driver.close
       if rts_:
         rts_.configure --output
         rts_.set 0
