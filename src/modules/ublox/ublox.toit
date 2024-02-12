@@ -127,16 +127,31 @@ class TcpSocket extends Socket_ implements tcp.Socket:
 
     cellular_.at_.do: | session/at.Session |
       try:
-        session.set "+USOWR" [get_id_, data.size] --data=data
+        // Write to the socket and check if any error occours
+        err := null
+        for i:=0; i<3; i++:
+          err = catch:
+            session.set "+USOWR" [get_id_, data.size] --data=data
+          if err:
+            // If there was an error, query for last socket error
+            last_error := (session.set "+USOCTL" [get_id_, 1]).single
+
+            // If the result is <socket>,<param_id>,<param_val> == get_id_, 1, 0
+            // Then there isn't any socket error present, but we likely
+            // got a ERROR due to a timing issue. In that case,
+            // we just try again after a short delay.
+            if last_error[0] == get_id_ and last_error[1] == 1 and last-error[2] == 0:
+              sleep --ms=50
+            else:
+              break
+          else:
+            break
+        if err: throw err
       finally: | is_exception e |
-        //TODO: Handle this better to recover in current state wihout starting completely over.
-        // May poll last socket error with: +USOCTL=1 or listen for +UUSOCL URC code
-        
         // If we get an exception while writing, we risk leaving the
         // modem in an awful state. Close the session to force us to
         // start over.
         if is_exception:
-          print "USOWR EXCEPTION: $e"
           sleep --ms=5000 // TODO: Sleep some time to see if the URC code comes. Remove this test at some point
           if provider_:
             provider_.disconnect
@@ -320,8 +335,8 @@ abstract class UBloxCellular extends CellularBase:
   static configure_at_ uart logger:
     at := at.Session uart uart
       --logger=logger
-      --data_delay=Duration --ms=50
-      --command_delay=Duration --ms=20
+      --data_delay=Duration --ms=55       // Datasheet specifies a minimum of 50ms, so we use 55ms to be sure. I seems to long delays also cause errors (tested at 60ms and 100ms)
+      --command_delay=Duration --ms=50    
 
     at.add_error_termination "+CME ERROR"
     at.add_error_termination "+CMS ERROR"
