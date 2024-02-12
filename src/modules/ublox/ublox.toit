@@ -693,9 +693,17 @@ class Interface_ extends CloseableNetwork implements net.Interface:
       return [net.IpAddress.parse host]
 
     // Async resolve is not supported on this device.
-    res := cellular_.at_.do: it.send
-      UDNSRN.sync host
-    return res.single.map: net.IpAddress.parse it
+    err := null
+    // We have seen situations, where we need to 
+    // try multiple times to resolve a host.
+    4.repeat:
+      err = catch:
+        res := cellular_.at_.do: it.send
+          UDNSRN.sync host
+        return res.single.map: net.IpAddress.parse it
+      if err: 
+        sleep --ms=500
+    throw err
 
   udp_open --port/int?=null -> udp.Socket:
     if port and port != 0: throw "cannot bind to custom port"

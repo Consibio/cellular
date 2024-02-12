@@ -356,9 +356,14 @@ abstract class CellularBase implements Cellular:
 
           // We test the IP stack here before releasing it
           // to ensure that it's working. If it's not, the
-          // reattempt loop will trigger again as a reaattach
+          // reattempt loop will trigger again as a reattach
           logger.debug "testing DNS lookup..."
-          session.set "+UDNSRN" [0, "google.com"] --timeout=(Duration --s=130)
+          for i:=0; i<4; i++:
+            err := catch:
+              session.set "+UDNSRN" [0, "google.com"] --timeout=(Duration --s=130)
+              break
+            if err:
+              sleep --ms=500
 
         finally:
           // TODO(kasper): Should we unregister the interest in the events?
