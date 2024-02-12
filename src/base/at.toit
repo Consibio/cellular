@@ -381,9 +381,11 @@ class Session:
         reader_.skip 1
         if command := command_:
           if data := command.data:
-            // Wait before sending data.
-            if data_delay: sleep data_delay
-            writer_.write data
+            // Wait before sending data
+            critical-do --no-respect-deadline:
+              if data_delay:
+                sleep data_delay
+              writer_.write data
             logger_.with_level log.DEBUG_LEVEL: it.debug "<- $(%c data_marker)"
             logger_.with_level log.DEBUG_LEVEL: it.debug "-> <$(data.size) bytes>"
             continue
