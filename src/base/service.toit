@@ -335,7 +335,8 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
       return driver.open-network --provider=this
     finally: | is_exception exception |
       if is_exception:
-        critical_do: close_driver driver --error=exception.value
+        critical_do --no-respect-deadline: 
+          close_driver driver --error=exception.value
       else:
         driver_ = driver
 
@@ -343,7 +344,7 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
     driver := driver_
     driver_ = null
     logger := driver.logger
-    critical_do:
+    critical_do --no-respect-deadline:
       try:
         close_driver driver
       finally:
@@ -462,7 +463,7 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
 
       // It appears as if we have to wait for RX to settle down, before
       // we start to look at the power state.
-      catch: with_timeout --ms=10_000: wait_for_quiescent_ rx_
+      catch --trace: with_timeout --ms=10_000: wait_for_quiescent_ rx_
 
       // The call to driver.close sends AT+CPWROFF. If the session wasn't
       // active, this can fail and therefore we probe its power state and
