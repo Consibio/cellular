@@ -756,7 +756,7 @@ class CPWROFF extends at.Command:
     super.action "+CPWROFF" --timeout=TIMEOUT
 
 class USOCL extends at.Command:
-  static TIMEOUT ::= Duration --s=120
+  static TIMEOUT ::= Duration --s=5
 
   constructor id/int:
     super.set "+USOCL" --parameters=[id] --timeout=TIMEOUT
