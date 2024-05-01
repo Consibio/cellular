@@ -143,7 +143,7 @@ class TcpSocket extends Socket_ with io.CloseableInMixin io.CloseableOutMixin im
         err := null
         for i:=0; i<3; i++:
           err = catch:
-            session.set "+USOWR" [get_id_, data.size] --data=data
+            session.set "+USOWR" [get_id_, data.byte-size] --data=data
           if err:
             // If there was an error, query for last socket error
             last_error := (session.set "+USOCTL" [get_id_, 1]).single
