@@ -40,7 +40,7 @@ class SaraR5Service extends CellularServiceProvider:
         --cts=cts
         --pwr_on=power
         --reset_n=reset
-        --uart_baud_rates=baud_rates or [921_600, cellular.Cellular.DEFAULT_BAUD_RATE]
+        --uart_baud_rates=baud_rates or [460_800, cellular.Cellular.DEFAULT_BAUD_RATE]
         --is_always_online=true
 
 /**
