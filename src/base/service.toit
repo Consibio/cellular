@@ -317,7 +317,7 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
             operator_ = driver.get_connected_operator
             logger.debug "connected to operator: $operator_"
 
-      connected_at_ = esp32.total_run_time
+      connected_at_ = Time.monotonic-us
       // Once the network is established, we change the state of the
       // cellular container to indicate that it is now running in
       // the foreground and needs to have its proxied networks closed
@@ -429,7 +429,7 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
     log_tags := error ? { "error": error } : null
     try:
       catch --trace: with-timeout --ms=10_000:
-        disconnected_at_ = esp32.total_run_time
+        disconnected_at_ = Time.monotonic-us
         log.log log_level "closing" --tags=log_tags
 
         // If we have an operator, we score it.
