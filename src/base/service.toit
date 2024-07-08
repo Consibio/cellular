@@ -87,6 +87,8 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
   disconnected_at_/int? := null
   operator_/Operator? := null
 
+  model_/string? := null
+
   static ATTEMPTS_KEY ::= "attempts"
   static SIGNAL_QUAL_KEY ::= "signal.qual"
   static SIGNAL_POWER_KEY ::= "signal.pwr"
@@ -223,85 +225,115 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
       // wait for the SIM to be ready first.
       catch:
         with_timeout --ms=20_000:
-          driver.wait_for_sim
-          update_cached_model driver.model
+          /* driver.wait_for_sim
+          model_ = driver.model
+          update_cached_model model_ */
           update_cached_iccid driver.iccid
-          update_cached_version driver.version
+          /* update_cached_version driver.version */
 
-      // The CFUN command (called in both driver.configure where
-      // the modem is disable with CFUN=0 and then enabled again
-      // in driver.enable_radio) can take up to 3 minutes. However,
-      // it ususally takes less than 1 seconds. We set the timeout
-      // to 3 minutes to ensure that we don't stop the disabling
-      // procedure prematurely, as we have observed that it can 
-      // leave the modem in a bad state.
-      with_timeout --ms=180_000:
-        logger.info "configuring modem" --tags={"apn": apn}
-        driver.configure apn --bands=bands --rats=rats
-        logger.info "enabling radio"
-        driver.enable_radio
+      
 
-      // Scans can take up to 3 minutes on u-blox SARA
-      with_timeout --ms=180_000:
-        catch --trace:
-          configured_operator_is_valid := configured_operator is string and configured_operator.size > 4
+      woke_up_after_psm_deepsleep := driver.woke_up_after_psm_deepsleep
 
-          // If we have tried to connect without succes more than
-          // 32 times, reset the scores to ensure that we are not
-          // stuck, if some scoring logic is broken. Only reset it
-          // if we are not using a configured operator, as we don't
-          // use the scores in that case.
-          if (not configured_operator_is_valid and attempts_ > 0 and attempts_ % CELLULAR_FAILS_UNTIL_SCORE_RESET == 0): 
-            scores_.reset_all
 
-          // If there is an operator forced by the configuration,
-          // just use that one and don't rely on the scoring mechanisms.
-          if configured_operator_is_valid:
-            operator_ = Operator configured_operator
+      driver.send_at_command "set" "+CEREG" --parameters=[2]
+      driver.send_at_command "read" "+CEREG"
+      driver.send_at_command "set" "+UPSND" --parameters=[0, 8]
 
-          // Every other attempt, we rely on the modem's current 
-          // settings for oeprator selection. This is to ensure
-          // that we try out new operators properly before manually
-          // selecting a new one.
-          else if (attempts_ > 0 and attempts_ % 2 == 0):
+      registered_on_network := driver.check_if_registered_on_network
+      
 
-            // If there is no operator enforced by the configuration,
-            // we rely on the scoring mechanisms to select the best
-            // operator.
+      // TODO: Check the PSD profile status (via AT+UPSND=0,8)
+
+      print "woke_up_after_psm_deepsleep=$woke_up_after_psm_deepsleep registered_on_network=$registered_on_network"
+      if driver.use_psm /* and driver.woke_up_after_psm_deepsleep */ and registered_on_network:
+        print "Woke up while PSM should be enabled. First waiting..."
+        while not driver.check_if_registered_on_network:
+          sleep --ms=500
+        print "Then checking if still registered"
+        print "[PsmDebug] driver.get_registration_status=$driver.get_registration_status"
+        print "[PsmDebug] driver.radio_enabled=$(driver.send_at_command "read" "+CFUN")"
+      
+        print "Still registered due to PSM. Continuing without additional setup."
+
+      else:
+        // The CFUN command (called in both driver.configure where
+        // the modem is disable with CFUN=0 and then enabled again
+        // in driver.enable_radio) can take up to 3 minutes. However,
+        // it ususally takes less than 1 seconds. We set the timeout
+        // to 3 minutes to ensure that we don't stop the disabling
+        // procedure prematurely, as we have observed that it can 
+        // leave the modem in a bad state.
+        with_timeout --ms=180_000:
+          logger.info "configuring modem" --tags={"apn": apn}
+          driver.configure apn --bands=bands --rats=rats
+          logger.info "enabling radio"
+          driver.enable_radio
+
+        // Scans can take up to 3 minutes on u-blox SARA
+        with_timeout --ms=180_000:
+          catch --trace:
+            configured_operator_is_valid := configured_operator is string and configured_operator.size > 4
 
             // If we have tried to connect without succes more than
-            // the number of times defined by CELLULAR_FAILS_UNTIL_SCAN,
-            // scan for operators on every multiple of this value.
-            should_scan := (attempts_ > 0) and (attempts_ % CELLULAR_FAILS_UNTIL_SCAN == 0)
-            if (should_scan):
-              logger.info "scanning for operators" --tags={"attempt": attempts_}
-              scores_.set_available_operators driver.scan_for_operators
+            // 32 times, reset the scores to ensure that we are not
+            // stuck, if some scoring logic is broken. Only reset it
+            // if we are not using a configured operator, as we don't
+            // use the scores in that case.
+            if (not configured_operator_is_valid and attempts_ > 0 and attempts_ % CELLULAR_FAILS_UNTIL_SCORE_RESET == 0): 
+              scores_.reset_all
 
-            // If the score of the operator connected last is below 
-            // the OPERATOR_SCORE_THRESHOLD, manually connect to a 
-            // new one, if there exists one with a higher score than 
-            // the last. Also do this if we have just scanned for 
-            // operators to ensure that we try out newly discovered
-            // operators. Furthermore, do this if we have tried to
-            // connect without success enough times.
-            // If no known scores are known, score_for_last_operator 
-            // will return 0, but get_best_operator will return null,
-            // so it will attempt automatic operator selection (COPS=0
-            // which is the default setting of the modem) until a scan
-            // has been performed at least one time or an operator
-            // was previously automatically selected with succes.
-            if scores_.score_for_last_operator < OPERATOR_SCORE_THRESHOLD 
-                or should_scan 
-                or attempts_ >= CELLULAR_FAILS_UNTIL_RESELECT:
-              operator_ = scores_.get_best_operator
-              if operator_:
-                logger.debug "using operator $operator_.op with score $(%.2f scores_.score_for_last_operator)%"
+            // If there is an operator forced by the configuration,
+            // just use that one and don't rely on the scoring mechanisms.
+            if configured_operator_is_valid:
+              operator_ = Operator configured_operator
+
+            // Every other attempt, we rely on the modem's current 
+            // settings for oeprator selection. This is to ensure
+            // that we try out new operators properly before manually
+            // selecting a new one.
+            else if (attempts_ > 0 and attempts_ % 2 == 0):
+
+              // If there is no operator enforced by the configuration,
+              // we rely on the scoring mechanisms to select the best
+              // operator.
+
+              // If we have tried to connect without succes more than
+              // the number of times defined by CELLULAR_FAILS_UNTIL_SCAN,
+              // scan for operators on every multiple of this value.
+              should_scan := (attempts_ > 0) and (attempts_ % CELLULAR_FAILS_UNTIL_SCAN == 0)
+              if (should_scan):
+                logger.info "scanning for operators" --tags={"attempt": attempts_}
+                scores_.set_available_operators driver.scan_for_operators
+
+              // If the score of the operator connected last is below 
+              // the OPERATOR_SCORE_THRESHOLD, manually connect to a 
+              // new one, if there exists one with a higher score than 
+              // the last. Also do this if we have just scanned for 
+              // operators to ensure that we try out newly discovered
+              // operators. Furthermore, do this if we have tried to
+              // connect without success enough times.
+              // If no known scores are known, score_for_last_operator 
+              // will return 0, but get_best_operator will return null,
+              // so it will attempt automatic operator selection (COPS=0
+              // which is the default setting of the modem) until a scan
+              // has been performed at least one time or an operator
+              // was previously automatically selected with succes.
+              if scores_.score_for_last_operator < OPERATOR_SCORE_THRESHOLD 
+                  or should_scan 
+                  or attempts_ >= CELLULAR_FAILS_UNTIL_RESELECT:
+                operator_ = scores_.get_best_operator
+                if operator_:
+                  logger.debug "using operator $operator_.op with score $(%.2f scores_.score_for_last_operator)%"
 
       // Connects can take up to 3 minutes on u-blox SARA
       with_timeout --ms=180_000:
         logger.info "connecting"
         // TODO: Set COPS=0 if successive_attempts_ > 4?
-        driver.connect --operator=operator_
+        if driver.use_psm:
+          driver.connect_psm
+        else:
+          driver.connect --operator=operator_
           
       update_attempts_ 0  // Success. Reset the attempts.
       logger.info "connected"
@@ -454,6 +486,32 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
           update_scores_
           logger.info "Saved new operator score to flash for $operator_.op. Scores are now: $scores_.stringify_scores"
 
+      //If we are using PSM, we need to enter deep sleep before closing the driver
+      if driver.use_psm:
+        print "[PsmDebug] (service.toit).close_driver: UCPSMS state: $(driver.send_at_command "read" "+UCPSMS")"
+        print "[PsmDebug] Check if we can call AT+USLEEP directly: model_=$model_"
+        if model_ and not model_.contains "00B":
+          print "[PsmDebug] (service.toit).close_driver: UPSMVER state: $(driver.send_at_command "read" "+UPSMVER")"
+          // TODO: From the docs: 
+          // Although the "OK" final result code is always returned, the command is 
+          // effective only if the bit 4 of the +UPSMVER <psm_ver> bitmask is enabled 
+          // (configuration with protocol stack in suspension at exit).
+          /* catch:
+            driver.enter_deep_sleep */
+
+        // TODO: If we cannot enter deep sleep by a command here, we need to wait
+        // for the timers. This should be indicated by the URCs of 
+        // +CSCON=0   =>  RRC connection released)
+        // +UUPSMR=1  =>  T3324 elapses and the device can enter PSM deep-sleep
+        has_entered_deep_sleep := false
+        catch: with_timeout --ms=10_000:
+          while not has_entered_deep_sleep:
+            has_entered_deep_sleep = driver.has_entered_deep_sleep
+            sleep --ms=500
+            print "[PsmDebug] Waiting for device to enter deep sleep...  has_entered_deep_sleep=$has_entered_deep_sleep"
+
+        driver.register_psm_sleep_start has_entered_deep_sleep // Write to RTC memory
+
       // Close the driver
       catch: with_timeout --ms=20_000: 
         driver.close
@@ -465,19 +523,32 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
       // we start to look at the power state.
       catch --trace: with_timeout --ms=10_000: wait_for_quiescent_ rx_
 
-      // The call to driver.close sends AT+CPWROFF. If the session wasn't
-      // active, this can fail and therefore we probe its power state and
-      // force it to power down if needed. The routine is not implemented
-      // for all modems, in which case is_power_off will return null.
-      // Therefore, we explicitly check for false.
-      is_powered_off := driver.is_powered_off
-      if is_powered_off == false:
-        logger.info "power off not complete, forcing power down"
-        driver.power_off
-      else if is_powered_off == null:
-        logger.info "cannot determine power state, assuming it's correctly powered down"
-      else:
-        logger.info "module is correctly powered off"
+      print "[PsmDebug] (service.toit).close_driver: driver.use_psm=$driver.use_psm"
+
+      if driver.use_psm:  
+        catch: with-timeout --ms=10_000:
+          is-powered-off := false
+          while not is-powered-off:
+            is-powered-off = driver.is_powered_off
+            print "driver.is_powered_off=$is-powered-off"
+            sleep --ms=2000
+/* 
+      // TODO: Also check driver.is_powered_off here instead of block above?
+      if not driver.has_entered_deep_sleep:
+
+        // The call to driver.close sends AT+CPWROFF. If the session wasn't
+        // active, this can fail and therefore we probe its power state and
+        // force it to power down if needed. The routine is not implemented
+        // for all modems, in which case is_power_off will return null.
+        // Therefore, we explicitly check for false.
+        is_powered_off := driver.is_powered_off
+        if is_powered_off == false:
+          logger.info "power off not complete, forcing power down"
+          driver.power_off
+        else if is_powered_off == null:
+          logger.info "cannot determine power state, assuming it's correctly powered down"
+        else:
+          logger.info "module is correctly powered off" */
 
     finally:
       close_pins_

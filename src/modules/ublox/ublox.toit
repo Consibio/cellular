@@ -436,11 +436,14 @@ abstract class UBloxCellular extends CellularBase:
     return (at_.do: it.read "+UFWSTATUS").single
 
   close:
+    print "[PsmDebug] UBloxCellular.close called with use_psm=$use_psm and is_lte_connection_=$is_lte_connection_"
     try:
       sockets_.values.do: it.closed_
       at_.do: | session/at.Session |
-        if session.is_closed: return
-        if use_psm and not failed_to_connect and not is_lte_connection_: return
+        if session.is_closed: 
+          print "[PsmDebug] session is already closed"
+          return
+        if use_psm/*  and has_entered_deep_sleep */: return
         // If the chip was recently rebooted, wait for it to be responsive before
         // communicating with it again.
         attempts := 0
@@ -548,11 +551,10 @@ abstract class UBloxCellular extends CellularBase:
 
   // TODO(kasper): Testing - default periodic tau is 70h.
   configure_psm_ session/at.Session --enable/bool --periodic_tau/string="01000111" -> bool:
-    cedrxs_changed/bool := false
-    catch: cedrxs_changed = apply_config_ session "+CEDRXS" [0]
+    print "[PsmDebug] configure_psm_ with enable=$enable and periodic_tau=$periodic_tau"
 
     psm_target := enable
-        ? [1, null, null, periodic_tau, "00001000"]  // T3324=Requested_Active_Time is 16s.
+        ? [1, null, null, periodic_tau, "00001000"]  // T3324=Requested_Active_Time is 0s. //TODO: Try decreasing this (was 16s)
         : [0]
     psv_target := enable
         ? psm_enabled_psv_target
@@ -560,6 +562,17 @@ abstract class UBloxCellular extends CellularBase:
 
     cpsms_changed/bool := apply_config_ session "+CPSMS" psm_target
     apply_config_ session "+UPSV" psv_target
+    session.action "&W"
+
+    cedrxs_changed/bool := false
+    catch: cedrxs_changed = apply_config_ session "+CEDRXS" [0]
+
+    // Disable the LwM2M client, as this can prevent the module from entering PSM.
+    session.set "+ULWM2M" [0]
+/* 
+    session.send
+      CFUN.reset --reset_sim */
+
     return reboot_after_cedrxs_or_cpsms_changes and (cedrxs_changed or cpsms_changed)
 
   abstract reboot_after_cedrxs_or_cpsms_changes -> bool
@@ -675,6 +688,7 @@ abstract class UBloxCellular extends CellularBase:
   set_baud_rate_  session/at.Session baud_rate:
     // Set the baud rate to the requested one.
     session.set "+IPR" [baud_rate]
+    print "[PsmDebug] Setting baud rate to: $baud_rate (inside set_baud_rate_)"
     uart_.baud_rate = baud_rate
 
     // Wait for at least 100ms before issuing a new command.
@@ -694,6 +708,23 @@ abstract class UBloxCellular extends CellularBase:
 
     while true:
       at_.do: it.set "+UTEST" [3,124150,23,null,null,5000]
+
+  enter_deep_sleep:
+    at_.do: it.action "+USLEEP"
+
+  get_registration_status -> List?:
+    result := at_.do: it.read "+CEREG"
+    return result.single
+
+  check_if_registered_on_network -> bool?:
+    response := get_registration_status
+    if not response: 
+      registered_on_network_ = false
+      return null
+    stat := response[1]
+    registered_on_network_ = stat == 1 or stat == 5
+    return registered_on_network_
+    
 
 class UBloxConstants implements Constants:
   RatCatM1 -> int?: return null

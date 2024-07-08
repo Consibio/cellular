@@ -71,7 +71,7 @@ class SaraR5 extends UBloxCellular:
       --config=CONFIG_
       --cat_m1
       --uart_baud_rates=uart_baud_rates
-      --use_psm=not is_always_online
+      --use_psm=true/* not is_always_online */
 
   network_name -> string:
     return "cellular:sara-r5"
@@ -150,7 +150,7 @@ class SaraR5 extends UBloxCellular:
     critical_do --no-respect_deadline:
       logger.debug "performing power_on sequence for Sara-R5"
       pwr_on.set 1
-      sleep --ms=1500
+      sleep --ms=1100
       pwr_on.set 0
       // The module is ready approx. 2sec after the power on
       // sequence is initiated. We wait a little while here 

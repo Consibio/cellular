@@ -12,6 +12,9 @@ import .at as at
 import .cellular
 import ..state show SignalQuality
 
+import system.storage
+bucket_/storage.Bucket ::= storage.Bucket.open --ram "ublox/cellular"
+
 REGISTRATION_DENIED_ERROR ::= "registration denied"
 
 /**
@@ -42,6 +45,10 @@ abstract class CellularBase implements Cellular:
 
   registered_on_network_/bool := false
   pdp_context_activated_/bool := false
+  connection_idle_/bool := false
+  has_entered_deep_sleep/bool := false
+
+  static WOKE_FROM_PSM_KEY ::= "woke_from_psm"
 
   constructor
       .uart_
@@ -87,10 +94,12 @@ abstract class CellularBase implements Cellular:
     return result
 
   connect_psm -> none:
+    print "[PsmDebug] connect_psm called!"
     at_.do: | session/at.Session |
       connect_ session --operator=null --psm
 
   connect --operator/Operator?=null --force-auto-cops/bool=false -> none:
+    print "[PsmDebug] connect called with no psm!"
     at_.do: | session/at.Session |
       connect_ session --operator=operator --no-psm --force-auto-cops=force-auto-cops
 
@@ -168,6 +177,7 @@ abstract class CellularBase implements Cellular:
   select_baud_ session/at.Session --count=5:
     preferred := uart_baud_rates.first
     uart_baud_rates.do: | rate |
+      print "[PsmDebug] Setting baud rate to: $rate (inside select_baud_)"
       uart_.baud_rate = rate
       // Test the baud rate multiple times to ensure that 
       // it works instead of trying it once and then change.
@@ -240,6 +250,7 @@ abstract class CellularBase implements Cellular:
       else: at_.do: it.action "" --no-check
 
   connect_ session/at.Session --operator/Operator? --psm/bool --reattach/bool=false --force-auto-cops/bool=false -> none:
+    print "[PsmDebug] connect_ called! with operator: $operator, psm: $psm, reattach: $reattach, force-auto-cops: $force-auto-cops"
     connection_attempt := 0
     while connection_attempt < 8:
       if reattach:
@@ -252,6 +263,26 @@ abstract class CellularBase implements Cellular:
         registration_latch := monitor.Latch
         registrations := { "+CEREG" }
         if support_gsm_: registrations.add "+CGREG"
+
+        // Enable registration events.
+        
+        if psm:
+          // Add URC handler for connection status
+          session.set "+CSCON" [1]
+          catch:
+            session.register_urc "+CSCON"::
+              cscon_val := it.first
+              connection_idle_ = cscon_val == 0
+
+          // Add URC handler for PSM deep sleep status
+          session.set "+UPSMR" [1]
+          catch:
+            session.register_urc "+UUPSMR"::
+              upsmr_val := it.first
+              has_entered_deep_sleep = upsmr_val == 1
+              print "[PsmDebug] $(has_entered_deep_sleep ? "Entered" : "Exited from") deep sleep!"
+              
+
         failed := {}
 
         // Register a callback handler for the URC (Unsolicited 
@@ -285,42 +316,48 @@ abstract class CellularBase implements Cellular:
 
         try:
           // Enable registration events.
-          registrations.do: session.set it [2]
+          registrations.do: session.set it [4]
 
-          if not psm:
-            // If the connection attempt is a reattach (ie. not a new
-            // operator connection), then the modem is configured, and
-            // we just ned a new network registration. We try to force 
-            // it by disabling and enabling the radio.
-            if reattach:
-              if not registered_on_network_:
-                logger.debug "toggling radio to force network registration..."
-                catch --trace:
-                  send_abortable_ session (CFUN.offline)
-                catch --trace:
-                  send_abortable_ session (CFUN.online)
+          if psm /* and woke_up_after_psm_deepsleep */ and registered_on_network_:
+            print "Checkin UPSD status to see if we have an assigned IP address"
+            upsd_status := session.set "+UPSND" [0, 0] --timeout=(Duration --s=5)
+            print "upsd_status param_tag=0 = $upsd_status"
+            print "[PsmDebug] PSM is enabled and we are already registered on the network! Not doing any more setup"
+            return
 
-            // If this a new connection attempt, we need to set
-            // control the operator selection settings.
-            else:
-              command := null
-              result := send_abortable_ session COPS.read
-              cur_cops := result.single
-              cur_mode := cur_cops[0]
+          // If the connection attempt is a reattach (ie. not a new
+          // operator connection), then the modem is configured, and
+          // we just ned a new network registration. We try to force 
+          // it by disabling and enabling the radio.
+          if reattach:
+            if not registered_on_network_:
+              logger.debug "toggling radio to force network registration..."
+              catch --trace:
+                send_abortable_ session (CFUN.offline)
+              catch --trace:
+                send_abortable_ session (CFUN.online)
 
-              // Only change to automatic mode if its enforced. 
-              // If not, do manual operator selection, but only if the
-              // operator is defined. In all other cases, we rely on
-              // the last COPS setting of the modem (which might be
-              // automatic or a manually chosen operator. In both cases,
-              // they will be retained in the modem's non-volatile memory).
-              // Calling COPS=0 or COPS=1,<oper> every time takes much longer.
-              if force-auto-cops and cur_mode != COPS.MODE_AUTOMATIC:
-                command = COPS.automatic
-              else if operator:
-                command = COPS.manual operator.op --rat=operator.rat
-              if command:
-                send_abortable_ session command
+          // If this a new connection attempt, we need to set
+          // control the operator selection settings.
+          else:
+            command := null
+            result := send_abortable_ session COPS.read
+            cur_cops := result.single
+            cur_mode := cur_cops[0]
+
+            // Only change to automatic mode if its enforced. 
+            // If not, do manual operator selection, but only if the
+            // operator is defined. In all other cases, we rely on
+            // the last COPS setting of the modem (which might be
+            // automatic or a manually chosen operator. In both cases,
+            // they will be retained in the modem's non-volatile memory).
+            // Calling COPS=0 or COPS=1,<oper> every time takes much longer.
+            if force-auto-cops and cur_mode != COPS.MODE_AUTOMATIC:
+              command = COPS.automatic
+            else if operator:
+              command = COPS.manual operator.op --rat=operator.rat
+            if command:
+              send_abortable_ session command
 
           // Wait for network registration, but only if we are not
           // already registered. We have seen situations where 
@@ -399,6 +436,27 @@ abstract class CellularBase implements Cellular:
   reset -> none:
   factory_reset -> none:
   is_powered_off -> bool?:
+    return null
+  enter_deep_sleep -> none:
+  get_registration_status -> List?:
+    return null
+  check_if_registered_on_network -> bool?:
+    return null
+  woke_up_after_psm_deepsleep -> bool:
+    return bucket_.get WOKE_FROM_PSM_KEY --if-absent=:false
+
+  register_psm_sleep_start value/bool -> none:
+    bucket_[WOKE_FROM_PSM_KEY] = value
+
+  send_at_command type/string command/string --parameters/List=[] -> any:
+    if type=="action":
+      return at_.do: it.action command
+    else if type=="set":
+      return at_.do: it.set command parameters
+    else if type=="read":
+      return at_.do: it.read command
+    else if type=="test":
+      return at_.do: it.test command
     return null
 
   /**

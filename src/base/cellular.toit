@@ -89,6 +89,19 @@ interface Cellular:
 
   is_powered_off -> bool?
 
+  enter_deep_sleep -> none
+
+  get_registration_status -> List?
+
+  check_if_registered_on_network -> bool?
+
+  has_entered_deep_sleep -> bool
+
+  send_at_command type/string command/string --parameters/List=[] -> any
+
+  woke_up_after_psm_deepsleep -> bool
+  register_psm_sleep_start value/bool -> none
+
 class Operator:
   op/string
   rat/int?
