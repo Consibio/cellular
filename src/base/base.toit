@@ -43,10 +43,12 @@ abstract class CellularBase implements Cellular:
 
   is_lte_connection_ := false
 
-  registered_on_network_/bool := false
-  pdp_context_activated_/bool := false
-  connection_idle_/bool := false
+  registered_on_network/bool? := null
+  pdp_context_activated/bool := false
+  connection_idle/bool := true
   has_entered_deep_sleep/bool := false
+  psd_profile_active/bool := false
+  psm_state/int? := null
 
   static WOKE_FROM_PSM_KEY ::= "woke_from_psm"
 
@@ -242,10 +244,13 @@ abstract class CellularBase implements Cellular:
 
   wait_for_urc_ --session/at.Session?=null [block]:
     while true:
-      catch --unwind=(: it != DEADLINE_EXCEEDED_ERROR):
+      err := catch --unwind=(: it != DEADLINE_EXCEEDED_ERROR):
         with_timeout --ms=1000:
+          print "calling block.call"
           return block.call
+          print "done calling block.call!"
       // Ping every second
+      print "err=$err"
       if session: session.action "" --no-check
       else: at_.do: it.action "" --no-check
 
@@ -253,93 +258,30 @@ abstract class CellularBase implements Cellular:
     print "[PsmDebug] connect_ called! with operator: $operator, psm: $psm, reattach: $reattach, force-auto-cops: $force-auto-cops"
     connection_attempt := 0
     while connection_attempt < 8:
-      if reattach:
-        logger.debug "reattach attempt=$connection_attempt"
+      logger.debug "$(reattach ? "reattach" : "connection") attempt=$connection_attempt"
+
       err := catch:
-        failed_to_connect = true
-        is_lte_connection_ = false
-        context_activated_/bool := false
+        if psm /* and woke_up_after_psm_deepsleep */ and registered_on_network :
+          print "[PsmDebug] PSM is enabled and we are already registered on the network! Not doing any more setup"
 
-        registration_latch := monitor.Latch
-        registrations := { "+CEREG" }
-        if support_gsm_: registrations.add "+CGREG"
-
-        // Enable registration events.
-        
-        if psm:
-          // Add URC handler for connection status
-          session.set "+CSCON" [1]
-          catch:
-            session.register_urc "+CSCON"::
-              cscon_val := it.first
-              connection_idle_ = cscon_val == 0
-
-          // Add URC handler for PSM deep sleep status
-          session.set "+UPSMR" [1]
-          catch:
-            session.register_urc "+UUPSMR"::
-              upsmr_val := it.first
-              has_entered_deep_sleep = upsmr_val == 1
-              print "[PsmDebug] $(has_entered_deep_sleep ? "Entered" : "Exited from") deep sleep!"
-              
-
-        failed := {}
-
-        // Register a callback handler for the URC (Unsolicited 
-        // Result Code) returned by the modem when network
-        // registration status changes.
-        registrations.do: | command/string |
-          catch --trace:
-            session.register_urc command::
-              state := it.first
-
-              // If we get a 1 or 5, we're registered on the network.
-              // 1 = registered, home network
-              // 5 = registered, roaming
-              if state == 1 or state == 5:
-                failed.remove command
-                registration_latch.set command
-                registered_on_network_ = true
-
-              // If we get a 3, registration has been denied.
-              else if state == 3 or state == 80:
-                failed.add command
-                error := state == 3 ? REGISTRATION_DENIED_ERROR : "connection lost"
-                // If all registrations have failed, we report the last error.
-                if failed.size == registrations.size: registration_latch.set --exception error
-                registered_on_network_ = false
-
-              // If we get a 0 we're not registered, so we should try again.
-              else if state==0:
-                logger.debug "no longer registered on network"
-                registered_on_network_ = false
-
-        try:
-          // Enable registration events.
-          registrations.do: session.set it [4]
-
-          if psm /* and woke_up_after_psm_deepsleep */ and registered_on_network_:
-            print "Checkin UPSD status to see if we have an assigned IP address"
-            upsd_status := session.set "+UPSND" [0, 0] --timeout=(Duration --s=5)
-            print "upsd_status param_tag=0 = $upsd_status"
-            print "[PsmDebug] PSM is enabled and we are already registered on the network! Not doing any more setup"
-            return
-
+        if not registered_on_network:
+          print "Not yet registered on the network, so we are performing normal attach"
           // If the connection attempt is a reattach (ie. not a new
           // operator connection), then the modem is configured, and
           // we just ned a new network registration. We try to force 
           // it by disabling and enabling the radio.
+
           if reattach:
-            if not registered_on_network_:
-              logger.debug "toggling radio to force network registration..."
-              catch --trace:
-                send_abortable_ session (CFUN.offline)
+            logger.debug "toggling radio to force network registration..."
+            catch --trace:
+              send_abortable_ session (CFUN.offline)
+
               catch --trace:
                 send_abortable_ session (CFUN.online)
 
           // If this a new connection attempt, we need to set
           // control the operator selection settings.
-          else:
+          else: // if not reattach
             command := null
             result := send_abortable_ session COPS.read
             cur_cops := result.single
@@ -359,53 +301,43 @@ abstract class CellularBase implements Cellular:
             if command:
               send_abortable_ session command
 
-          // Wait for network registration, but only if we are not
-          // already registered. We have seen situations where 
-          // registration succeeds before this point, so we need
-          // to check if we are already registered.
-          if not registered_on_network_:
-            logger.debug "waiting for network registration"
-            wait_for_urc_ --session=session:
-              if registration_latch.get == "+CGREG":
-                is_lte_connection_ = true
-                use_psm = false
-          
-          // Set up the URC handler for the PDP context activation.
-          activation_latch := monitor.Latch
-          command := "+UUPSDA"
-          registrations.add command
-          session.register_urc command::
-            result := it.first
-            if result == 0:
-              pdp_context_activated_ = true
-              activation_latch.set command
-            else:
-              pdp_context_activated_ = false
-              activation_latch.set --exception "PDP context activation failed"
-
-          // Activate the PDP context.
-          on_connected_ session
-          failed_to_connect = false
-
-          // Wait for the PDP context activation URC
-          logger.debug "waiting for PDP context activation"
+        // Wait for network registration, but only if we are not
+        // already registered. We have seen situations where 
+        // registration succeeds before this point, so we need
+        // to check if we are already registered.
+        if not registered_on_network:
+          logger.debug "waiting for network registration"
           wait_for_urc_ --session=session:
-            if activation_latch.get == "+UUPSDA":
-              logger.debug "PDP context activation successful"
+            while not registered_on_network:
+              sleep --ms=100
+            print "[PsmDebug] Registered on network!"
 
-          // We test the IP stack here before releasing it
-          // to ensure that it's working. If it's not, the
-          // reattempt loop will trigger again as a reattach
-          logger.debug "testing DNS lookup..."
-          for i:=0; i<4; i++:
-            err := catch:
-              session.set "+UDNSRN" [0, "google.com"] --timeout=(Duration --s=130)
-              break
-            if err:
-              sleep --ms=500
+        // Activate the PDP context. We can first do this, when we
+        // are registered on the network.
+        on_connected_ session
+        failed_to_connect = false
 
-        finally:
-          registrations.do: session.unregister_urc it
+        // Wait for the PDP context activation URC
+        logger.debug "waiting for PDP context activation and connection to settle"
+        wait_for_urc_ --session=session:
+          while ((not pdp_context_activated) or (not registered_on_network) /* or connection_idle */):
+            sleep --ms=100
+          /* if activation_latch.get == "+UUPSDA": */
+          logger.debug "PDP context activation successful"
+
+        // We test the IP stack here before releasing it
+        // to ensure that it's working. If it's not, the
+        // reattempt loop will trigger again as a reattach
+        sleep --ms=500
+        logger.debug "testing DNS lookup... [registered_on_network=$registered_on_network connection_idle=$connection_idle pdp_context_activated=$pdp_context_activated psd_profile_active=$psd_profile_active]"
+        dns_err := null
+        for i:=0; i<4; i++:
+          dns_err = catch:
+            session.set "+UDNSRN" [0, "google.com"] --timeout=(Duration --s=10)
+            break
+          if dns_err:
+            sleep --ms=500
+        if dns_err: throw dns_err
 
         return
       
@@ -438,10 +370,7 @@ abstract class CellularBase implements Cellular:
   is_powered_off -> bool?:
     return null
   enter_deep_sleep -> none:
-  get_registration_status -> List?:
-    return null
-  check_if_registered_on_network -> bool?:
-    return null
+
   woke_up_after_psm_deepsleep -> bool:
     return bucket_.get WOKE_FROM_PSM_KEY --if-absent=:false
 
@@ -458,6 +387,35 @@ abstract class CellularBase implements Cellular:
     else if type=="test":
       return at_.do: it.test command
     return null
+
+  register_urc_handlers -> none:
+    // Do nothing by default.
+
+  psm_mode_assigned -> bool?:
+    return null
+
+  radio_is_enabled -> bool?:
+    return null
+  
+  wait_for_network_registration --timeout/Duration=(Duration --s=5) -> none:
+    print "wait_for_network_registration called! timeout=$timeout"
+    err := catch: with_timeout timeout:
+        // Wait for network registration.
+        wait_for_urc_:
+          print "before while loop..."
+          while not registered_on_network: 
+            print "waiting..."
+            sleep --ms=100
+    print "wait_for_network_registration done!"
+  
+  enable_heartbeats -> none:
+    at_.do: it.send_heartbeats = true
+  
+  disable_heartbeats -> none:
+    at_.do: it.send_heartbeats = false
+  
+  heartbeats_enabled -> bool:
+    return at_.do: it.send_heartbeats
 
   /**
   Called when the driver has connected.
@@ -486,6 +444,9 @@ class CFUN extends at.Command:
 
   constructor.get:
     super.read "+CFUN" --timeout=TIMEOUT
+  
+  constructor.fast_shutdown:
+    super.set "+CFUN" --parameters=[10] --timeout=TIMEOUT
 
 class COPS extends at.Command:
   // COPS times out after 180s, but since it can be aborted, any timeout can be used.

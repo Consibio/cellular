@@ -300,6 +300,8 @@ abstract class UBloxCellular extends CellularBase:
   async_socket_connect/bool
   async_socket_close/bool
 
+  error_task_ := null
+
   /**
   Called when the driver should reset.
   */
@@ -318,6 +320,11 @@ abstract class UBloxCellular extends CellularBase:
       --use_psm:
     config_ = config
     at_session := configure_at_ uart logger
+
+    error_task_ = task::
+      while true:
+        print "\n\nuart.errors=$(uart.errors)\n\n"
+        sleep --ms=5000
 
     super uart at_session
       --logger=logger
@@ -353,6 +360,58 @@ abstract class UBloxCellular extends CellularBase:
           else:
             socket.error_ = args[1]
             socket.closed_
+
+    // Network registration change event
+    at_session.register_urc "+CEREG"::
+      state := it.first
+      // If we get a 1 or 5, we're registered on the network.
+      // 1 = registered, home network
+      // 5 = registered, roaming
+      if state == 1 or state == 5:
+        registered_on_network = true
+
+      // If we get a 3, registration has been denied.
+      else if state == 3 or state == 80:
+        error := state == 3 ? REGISTRATION_DENIED_ERROR : "connection lost"
+        // If all registrations have failed, we report the last error.
+        log.warn "registration failed: $error"
+        registered_on_network = false
+
+      // If we get a 0 we're not registered, so we should try again.
+      else if state==0:
+        logger.debug "no longer registered on network"
+        registered_on_network = false
+      print "[URC] CEREG handler: registered_on_network=$registered_on_network"
+
+    // Signalling connection status change event
+    at_session.register_urc "+CSCON"::
+      cscon_val := it.first
+      connection_idle = cscon_val == 0
+
+    // PSM wakeup event
+    at_session.register_urc "+UUPSMR"::
+      upsmr_val := it.first
+      if upsmr_val == 0:
+        psm_state = PSM_STATE_EXITED
+      else if upsmr_val == 1:
+        psm_state = PSM_STATE_ENTERED
+      else if upsmr_val == 2:
+        psm_state = PSM_STATE_PREVENTED
+      else if upsmr_val == 3:
+        psm_state = PSM_STATE_PREVENTED
+      else:
+        psm_state = PSM_STATE_UNKNOWN
+
+      has_entered_deep_sleep = upsmr_val == 1
+      print "[PsmDebug] $(has_entered_deep_sleep ? "Entered" : "Exited from") deep sleep! psm_state=$psm_state"
+
+    // TODO: Should this be registered here?
+    at_session.register_urc "+UUPSDA"::
+      result := it.first
+      if result == 0:
+        pdp_context_activated = true
+      else:
+        pdp_context_activated = false
 
   static configure_at_ uart/uart.Port logger/log.Logger -> at.Session:
     at := at.Session uart.in uart.out
@@ -443,14 +502,29 @@ abstract class UBloxCellular extends CellularBase:
         if session.is_closed: 
           print "[PsmDebug] session is already closed"
           return
-        if use_psm/*  and has_entered_deep_sleep */: return
+        if use_psm and (psm_state == PSM_STATE_ENTERED): return
         // If the chip was recently rebooted, wait for it to be responsive before
         // communicating with it again.
         attempts := 0
-        catch --trace: with-timeout --ms=20_000:
-          while true:
+        // TODO: Maybe send CFUN=10 if the command below takes too long?
+        // CFUN=10 is a fast and safe power-off without detach request sent to the network.
+        catch --trace: with-timeout --ms=50_000:
+          // If power saving mode is activated, the UART interface
+          // might be disabled (acc. to the timeout defined in the
+          // call to AT+UPSV) We need to wake up the module before
+          // sending the power off command. If the UART times out, 
+          // the module is still not powered off.
+          
+          alive_test := session.action "" --no-check
+          print "alive_test=$alive_test"
+          if alive_test == null:
+            wait_for_ready_ session
+          
+          if psm_state == PSM_STATE_PREVENTED:
+            session.send CFUN.fast_shutdown
+          else:
             session.send CPWROFF
-            return
+            
     finally:
       at_session_.close
       uart_.close
@@ -554,21 +628,22 @@ abstract class UBloxCellular extends CellularBase:
     print "[PsmDebug] configure_psm_ with enable=$enable and periodic_tau=$periodic_tau"
 
     psm_target := enable
-        ? [1, null, null, periodic_tau, "00001000"]  // T3324=Requested_Active_Time is 0s. //TODO: Try decreasing this (was 16s)
+        ? [1, null, null, periodic_tau, "00000000"]  // T3324=Requested_Active_Time is 0s. //TODO: Try decreasing this (was 16s)
         : [0]
     psv_target := enable
         ? psm_enabled_psv_target
         : [0]
 
+    // Disable the LwM2M client, as this can prevent the module from entering PSM.
+    session.set "+ULWM2M" [0]
+
     cpsms_changed/bool := apply_config_ session "+CPSMS" psm_target
     apply_config_ session "+UPSV" psv_target
-    session.action "&W"
 
     cedrxs_changed/bool := false
     catch: cedrxs_changed = apply_config_ session "+CEDRXS" [0]
 
-    // Disable the LwM2M client, as this can prevent the module from entering PSM.
-    session.set "+ULWM2M" [0]
+    
 /* 
     session.send
       CFUN.reset --reset_sim */
@@ -712,18 +787,25 @@ abstract class UBloxCellular extends CellularBase:
   enter_deep_sleep:
     at_.do: it.action "+USLEEP"
 
-  get_registration_status -> List?:
-    result := at_.do: it.read "+CEREG"
-    return result.single
+  psm_mode_assigned -> bool?:
+    catch: with_timeout --ms=1_000:
+      return (at_.do: it.read "+UCPSMS").single[0] == 1
+    return null
 
-  check_if_registered_on_network -> bool?:
-    response := get_registration_status
-    if not response: 
-      registered_on_network_ = false
-      return null
-    stat := response[1]
-    registered_on_network_ = stat == 1 or stat == 5
-    return registered_on_network_
+  radio_is_enabled -> bool?:
+    catch: with_timeout --ms=1_000:
+      return (at_.do: it.read "+CFUN").single[0] == 1
+    return null
+
+  register_urc_handlers:
+    // CEREG
+    at_.do: it.set "+CEREG" [4]
+
+    // CSCON
+    at_.do: it.set "+CSCON" [1]
+
+    // CPSMS
+    at_.do: it.set "+UPSMR" [1]
     
 
 class UBloxConstants implements Constants:

@@ -93,12 +93,12 @@ class SaraR5 extends UBloxCellular:
     // If left untouched, the network will normally provide it,
     // but we have seen that the this can be unreliable for some
     // networks (e.g. Telenor DK and TDC DK)
-    if not registered_on_network_: throw "not registered on network"
+    if not registered_on_network: throw "not registered on network"
     session.set "+UPSD" [0, 4, "8.8.8.8"] --timeout=(Duration --s=5)
     session.set "+UPSD" [0, 5, "8.8.4.4"] --timeout=(Duration --s=5)
 
     // Activate PDP context 1.
-    if not registered_on_network_: throw "not registered on network"
+    if not registered_on_network: throw "not registered on network"
     session.set "+CGACT" [1, 1] --timeout=(Duration --s=150)
 
     //TODO: Handle handling of IP protocol type depending on 
@@ -118,17 +118,17 @@ class SaraR5 extends UBloxCellular:
     //    1: IPv6
     //    2: IPv4v6 with IPv4 preferred for internal sockets
     //    3: IPv4v6 with IPv6 preferred for internal sockets
-    if not registered_on_network_: throw "not registered on network"
+    if not registered_on_network: throw "not registered on network"
     session.set "+UPSD" [0, 0, 0] --timeout=(Duration --s=5)
 
     // Map PSD profile id 0 to PDP context ID (cid) 1
-    if not registered_on_network_: throw "not registered on network"
+    if not registered_on_network: throw "not registered on network"
     session.set "+UPSD" [0, 100, 1] --timeout=(Duration --s=5)
 
     // Activate the PSD profile #0.
     // This should be called each time. If not called
     // the subsequent USOCR (socket create) will fail.
-    if not registered_on_network_: throw "not registered on network"
+    if not registered_on_network: throw "not registered on network"
     send_abortable_ session (UPSDA --action=3)
 
   psm_enabled_psv_target -> List:

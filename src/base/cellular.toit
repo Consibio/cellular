@@ -14,6 +14,11 @@ RAT_LTE_M ::= 1
 RAT_NB_IOT ::= 2
 RAT_GSM ::= 3
 
+PSM_STATE_UNKNOWN ::= null
+PSM_STATE_EXITED ::= 0
+PSM_STATE_ENTERED ::= 1
+PSM_STATE_PREVENTED ::= 2
+
 /**
 Cellular driver interface for
 */
@@ -91,16 +96,29 @@ interface Cellular:
 
   enter_deep_sleep -> none
 
-  get_registration_status -> List?
-
-  check_if_registered_on_network -> bool?
-
+  registered_on_network -> bool?
+  connection_idle -> bool?
+  pdp_context_activated -> bool?
+  psd_profile_active -> bool?
   has_entered_deep_sleep -> bool
+  psm_state -> int?
 
   send_at_command type/string command/string --parameters/List=[] -> any
 
   woke_up_after_psm_deepsleep -> bool
   register_psm_sleep_start value/bool -> none
+
+  register_urc_handlers -> none
+
+  psm_mode_assigned -> bool?
+
+  radio_is_enabled -> bool?
+
+  wait_for_network_registration --timeout/Duration -> none
+
+  enable_heartbeats -> none
+  disable_heartbeats -> none
+  heartbeats_enabled -> bool
 
 class Operator:
   op/string

@@ -225,38 +225,33 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
       // wait for the SIM to be ready first.
       catch:
         with_timeout --ms=20_000:
-          /* driver.wait_for_sim
+          driver.wait_for_sim
           model_ = driver.model
-          update_cached_model model_ */
+          update_cached_model model_
           update_cached_iccid driver.iccid
           /* update_cached_version driver.version */
 
+      // TODO: After that, we register URC handlers to update local state after this
+      driver.register_urc_handlers
+
+      /* print "Sleeping to check heartbeat..  driver.heartbeats_enabled=$driver.heartbeats_enabled"
+      sleep --ms=5000 */
       
+      print "Checking if everything is already set up for communication..  driver.psm_state=$driver.psm_state"
+      if driver.use_psm and driver.psm_mode_assigned and driver.psm_state == PSM_STATE_EXITED:
+        
+        print "PSM mode is assigned. Checking if we register immediately by enabling radio..."
+        driver.enable_radio
 
-      woke_up_after_psm_deepsleep := driver.woke_up_after_psm_deepsleep
-
-
-      driver.send_at_command "set" "+CEREG" --parameters=[2]
-      driver.send_at_command "read" "+CEREG"
-      driver.send_at_command "set" "+UPSND" --parameters=[0, 8]
-
-      registered_on_network := driver.check_if_registered_on_network
-      
-
-      // TODO: Check the PSD profile status (via AT+UPSND=0,8)
-
-      print "woke_up_after_psm_deepsleep=$woke_up_after_psm_deepsleep registered_on_network=$registered_on_network"
-      if driver.use_psm /* and driver.woke_up_after_psm_deepsleep */ and registered_on_network:
-        print "Woke up while PSM should be enabled. First waiting..."
-        while not driver.check_if_registered_on_network:
-          sleep --ms=500
-        print "Then checking if still registered"
-        print "[PsmDebug] driver.get_registration_status=$driver.get_registration_status"
-        print "[PsmDebug] driver.radio_enabled=$(driver.send_at_command "read" "+CFUN")"
-      
-        print "Still registered due to PSM. Continuing without additional setup."
+        print "Waiting for registration.."
+        driver.wait_for_network_registration --timeout=(Duration --s=5)
+        
+         
+      if driver.registered_on_network:
+        print "Already registered on network. Skipping configuration."
 
       else:
+        print "Not registered on network. Configuring modem.."
         // The CFUN command (called in both driver.configure where
         // the modem is disable with CFUN=0 and then enabled again
         // in driver.enable_radio) can take up to 3 minutes. However,
@@ -487,8 +482,12 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
           logger.info "Saved new operator score to flash for $operator_.op. Scores are now: $scores_.stringify_scores"
 
       //If we are using PSM, we need to enter deep sleep before closing the driver
-      if driver.use_psm:
-        print "[PsmDebug] (service.toit).close_driver: UCPSMS state: $(driver.send_at_command "read" "+UCPSMS")"
+      if driver.use_psm and driver.psm_mode_assigned:
+
+        // Modem will first go into deep sleep, when activity on the UART stops
+        // Therefore, we need to disable heartbeats before closing the driver
+        driver.disable_heartbeats
+
         print "[PsmDebug] Check if we can call AT+USLEEP directly: model_=$model_"
         if model_ and not model_.contains "00B":
           print "[PsmDebug] (service.toit).close_driver: UPSMVER state: $(driver.send_at_command "read" "+UPSMVER")"
@@ -496,21 +495,23 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
           // Although the "OK" final result code is always returned, the command is 
           // effective only if the bit 4 of the +UPSMVER <psm_ver> bitmask is enabled 
           // (configuration with protocol stack in suspension at exit).
-          /* catch:
-            driver.enter_deep_sleep */
+          catch:
+            driver.enter_deep_sleep
 
         // TODO: If we cannot enter deep sleep by a command here, we need to wait
         // for the timers. This should be indicated by the URCs of 
         // +CSCON=0   =>  RRC connection released)
         // +UUPSMR=1  =>  T3324 elapses and the device can enter PSM deep-sleep
-        has_entered_deep_sleep := false
-        catch: with_timeout --ms=10_000:
-          while not has_entered_deep_sleep:
-            has_entered_deep_sleep = driver.has_entered_deep_sleep
-            sleep --ms=500
-            print "[PsmDebug] Waiting for device to enter deep sleep...  has_entered_deep_sleep=$has_entered_deep_sleep"
+        catch: with_timeout --ms=20_000:
+          while not driver.psm_state == PSM_STATE_ENTERED:
+            if driver.psm_state == PSM_STATE_PREVENTED:
+              print "[PsmDebug] PSM is prevented by an unknown reason. Exiting and just closing modem normally."
+              break
+            sleep --ms=100
+            print "[PsmDebug] Waiting for device to enter deep sleep...  has_entered_deep_sleep=$(driver.psm_state == PSM_STATE_ENTERED)"
 
-        driver.register_psm_sleep_start has_entered_deep_sleep // Write to RTC memory
+        // TODO: We probably don't need this. The flag could probably be deleted
+        driver.register_psm_sleep_start (driver.psm_state == PSM_STATE_ENTERED) // Write to RTC memory
 
       // Close the driver
       catch: with_timeout --ms=20_000: 
@@ -526,12 +527,12 @@ abstract class CellularServiceProvider extends ProxyingNetworkServiceProvider:
       print "[PsmDebug] (service.toit).close_driver: driver.use_psm=$driver.use_psm"
 
       if driver.use_psm:  
-        catch: with-timeout --ms=10_000:
+        catch: with-timeout --ms=20_000:
           is-powered-off := false
           while not is-powered-off:
             is-powered-off = driver.is_powered_off
             print "driver.is_powered_off=$is-powered-off"
-            sleep --ms=2000
+            sleep --ms=1000
 /* 
       // TODO: Also check driver.is_powered_off here instead of block above?
       if not driver.has_entered_deep_sleep:
